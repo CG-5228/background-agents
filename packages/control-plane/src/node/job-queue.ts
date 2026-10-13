@@ -65,7 +65,7 @@ const DEFAULT_NOW = (): number => Date.now();
 const DEFAULT_NEW_ID = (): string => crypto.randomUUID();
 
 function isJobKind(kind: string): kind is JobKind {
-  return kind in JOB_KINDS;
+  return Object.hasOwn(JOB_KINDS, kind);
 }
 
 export interface NodeJobsOptions {

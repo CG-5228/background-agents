@@ -266,7 +266,7 @@ describe("NodeJobs", () => {
       claim: vi.fn(() => [
         {
           id: "corrupt-kind",
-          kind: "not.a.real.kind",
+          kind: "constructor",
           payload: JSON.stringify(PAYLOAD),
           attempts: 1,
           token: "claim-token",
@@ -296,7 +296,7 @@ describe("NodeJobs", () => {
     expect(bury).toHaveBeenCalledWith(
       "corrupt-kind",
       "claim-token",
-      "Unknown job kind: not.a.real.kind"
+      "Unknown job kind: constructor"
     );
   });
 
