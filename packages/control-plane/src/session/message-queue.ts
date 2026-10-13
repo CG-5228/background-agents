@@ -350,14 +350,7 @@ export class SessionMessageQueue {
       throw error;
     }
 
-    const session = this.repository.getSession();
-    const sessionId = session?.session_name || session?.id;
-    if (sessionId) {
-      this.backgroundTasks.submit(() => this.sessionIndex.touchUpdatedAt(sessionId), {
-        name: "session_index.touch_updated_at",
-        context: { session_id: sessionId },
-      });
-    }
+    this.touchSessionActivity();
 
     this.wsManager.send(ws, {
       type: "prompt_queued",
@@ -709,11 +702,19 @@ export class SessionMessageQueue {
 
   async enqueuePromptFromApi(
     data: EnqueuePromptRequest
-  ): Promise<{ messageId: string; status: "queued" }> {
+  ): Promise<{ messageId: string; status: "queued"; deduplicated: boolean }> {
     this.assertPromptableSession();
     this.assertSandboxAcceptingPrompts();
-    this.assertBudgetAvailable();
-    this.assertQueueCapacity();
+    // A request id naming a prompt already queued is answered by enqueuePromptCore's
+    // idempotency lookup, whatever the budget or capacity is now. New work is refused
+    // here, before any participant changes.
+    if (
+      !data.clientRequestId ||
+      !this.messageRepository.getMessageByClientRequestId(data.clientRequestId)
+    ) {
+      this.assertBudgetAvailable();
+      this.assertQueueCapacity();
+    }
     let participant = this.participantService.getByUserId(data.authorId);
     if (!participant) {
       const name = data.scmEnrichment?.name || data.authorId;
@@ -753,11 +754,15 @@ export class SessionMessageQueue {
       reasoningEffort: data.reasoningEffort,
       attachments: data.attachments,
       callbackContext: data.callbackContext,
+      clientRequestId: data.clientRequestId,
     });
 
+    // An already-active session keeps its index timestamp through the status sync, so
+    // record the activity here: session continuity measures its window from it.
+    this.touchSessionActivity();
     await this.processMessageQueue();
 
-    return { messageId: enqueued.messageId, status: "queued" };
+    return { messageId: enqueued.messageId, status: "queued", deduplicated: enqueued.deduplicated };
   }
 
   private async enqueuePromptCore(data: EnqueuePromptCoreData): Promise<EnqueuedPrompt> {
@@ -800,6 +805,7 @@ export class SessionMessageQueue {
         return {
           messageId: existing.id,
           position: this.messageRepository.getUnfinishedMessagePosition(existing.id),
+          deduplicated: true,
         };
       }
     }
@@ -883,7 +889,18 @@ export class SessionMessageQueue {
       queue_depth_after: position,
     });
 
-    return { messageId, position };
+    return { messageId, position, deduplicated: false };
+  }
+
+  /** Refresh the session index's activity timestamp in the background. */
+  private touchSessionActivity(): void {
+    const session = this.repository.getSession();
+    const sessionId = session?.session_name || session?.id;
+    if (!sessionId) return;
+    this.backgroundTasks.submit(() => this.sessionIndex.touchUpdatedAt(sessionId), {
+      name: "session_index.touch_updated_at",
+      context: { session_id: sessionId },
+    });
   }
 
   private assertBudgetAvailable(): void {
