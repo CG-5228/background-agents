@@ -1,79 +1,55 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { SEARCH_DEBOUNCE_MS } from "@/lib/search";
 
 /**
  * A search box mirrored in one URL query parameter, so a filtered view can be shared or reloaded.
  *
  * The URL is the source of truth for the applied search (`value`). Typed text is written to the
- * URL after SEARCH_DEBOUNCE_MS, through `commit`, which maps text to the value to write ("" removes
- * the parameter) or to null when the text should not be written at all.
+ * URL once the value to write has been stable for SEARCH_DEBOUNCE_MS, through `commit`, which maps
+ * text to that value ("" removes the parameter) or to null when the text should not be written.
  *
- * A write takes a moment to show up in the URL, so the hook tracks the value it last wrote rather
- * than comparing against the rendered URL (as the sessions page does):
- * - When the URL reaches the value we wrote, the box keeps the text as typed (a trailing space, or
- *   a one-letter edit that commits to no search). An earlier write landing late is ignored.
- * - A later edit is written even if the URL has not caught up, so reversing a change before the
- *   previous write lands is not lost.
- * - Any URL change while nothing of ours is in flight is navigation (a link, back/forward) and
- *   replaces the box, including text not yet written. Navigation that lands while a write is in
- *   flight is overtaken by that write.
+ * The box remembers which URL value its text accounts for: the last one we wrote or navigated to.
+ * When the URL changes and still holds that value (our own write arriving, or another parameter
+ * changing), the box keeps the text as typed. Any other change is navigation: it replaces the box
+ * and discards text not yet written.
  */
 export function useUrlSearchParam(name: string, commit: (raw: string) => string | null) {
   const params = useSearchParams();
-  const router = useRouter();
-  const pathname = usePathname();
   const value = params.get(name) ?? "";
   const [text, setTextState] = useState(value);
-  // Text typed since the URL last matched the box; null when there is none.
-  const pending = useRef<string | null>(null);
-  // The value we wrote and have not yet seen in the URL; null when no write is in flight.
-  const inFlight = useRef<string | null>(null);
-  const commitRef = useRef(commit);
-  useEffect(() => {
-    commitRef.current = commit;
-  }, [commit]);
-
-  useEffect(() => {
-    if (inFlight.current !== null) {
-      if (value !== inFlight.current) return; // an earlier write of ours landing late
-      inFlight.current = null;
-      if (pending.current !== null && commitRef.current(pending.current) === value) {
-        pending.current = null; // the typed text is applied; keep it as typed
-      }
-      return;
+  // The URL value the box's text accounts for.
+  const [expected, setExpected] = useState(value);
+  // What typed text will write once typing pauses; null when nothing is waiting.
+  const [draft, setDraft] = useState<string | null>(null);
+  // Watch each URL snapshot, not just its value: after a write of ours that never showed up,
+  // navigation can return to the exact query last rendered and must still be noticed.
+  const [seenParams, setSeenParams] = useState(params);
+  if (params !== seenParams) {
+    setSeenParams(params);
+    if (value !== expected) {
+      setTextState(value);
+      setExpected(value);
+      setDraft(null);
     }
-    pending.current = null;
-    setTextState(value);
-  }, [value]);
+  }
 
   useEffect(() => {
-    const typed = pending.current;
-    if (typed === null) return;
-    const target = commitRef.current(typed);
-    if (target === null) return;
+    if (draft === null) return;
     const timeout = window.setTimeout(() => {
-      const expected = inFlight.current ?? params.get(name) ?? "";
-      if (target === expected) {
-        if (inFlight.current === null) pending.current = null;
-        return;
-      }
-      const query = new URLSearchParams(params.toString());
-      if (target) query.set(name, target);
-      else query.delete(name);
-      const queryString = query.toString();
-      inFlight.current = target;
-      router.replace(queryString ? `${pathname}?${queryString}` : pathname, { scroll: false });
+      setExpected(draft);
+      setDraft(null);
+      writeSearchParam(name, draft);
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timeout);
-  }, [text, name, params, pathname, router]);
+  }, [name, draft]);
 
-  const setText = useCallback((next: string) => {
-    pending.current = next;
+  function setText(next: string) {
     setTextState(next);
-  }, []);
+    setDraft(commit(next));
+  }
 
   return {
     /** The box's text, including anything not yet written to the URL. */
@@ -82,4 +58,38 @@ export function useUrlSearchParam(name: string, commit: (raw: string) => string 
     /** The parameter's current URL value. */
     value,
   };
+}
+
+// The address bar, not useSearchParams: replaceState updates it synchronously, while
+// useSearchParams follows a render later. Never call these during render.
+
+function readSearchParam(name: string): string {
+  return new URLSearchParams(window.location.search).get(name) ?? "";
+}
+
+/** Sets (or, for "", removes) one parameter, keeping the others, without a server round trip. */
+function writeSearchParam(name: string, value: string) {
+  if (readSearchParam(name) === value) return;
+  const query = new URLSearchParams(window.location.search);
+  if (value) query.set(name, value);
+  else query.delete(name);
+  const queryString = query.toString();
+  const { pathname } = window.location;
+  window.history.replaceState(
+    appHistoryState(),
+    "",
+    queryString ? `${pathname}?${queryString}` : pathname
+  );
+}
+
+// Next skips syncing useSearchParams for writes carrying its own keys, and copies them back itself.
+const NEXT_HISTORY_KEYS = ["__NA", "_N", "__PRIVATE_NEXTJS_INTERNALS_TREE"];
+
+/** The current entry's app-owned state (e.g. mobile settings' detail flag), without Next's keys. */
+function appHistoryState(): Record<string, unknown> | null {
+  const state: unknown = window.history.state;
+  if (!state || typeof state !== "object") return null;
+  return Object.fromEntries(
+    Object.entries(state).filter(([key]) => !NEXT_HISTORY_KEYS.includes(key))
+  );
 }
