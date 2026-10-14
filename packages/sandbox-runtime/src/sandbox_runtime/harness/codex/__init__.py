@@ -91,6 +91,8 @@ class CodexHarness:
         self._stopping = False
         self._revocation_stop: asyncio.Task[bool] | None = None
         self.session_id: str | None = None
+        # Set when open() rejected an existing manifest. A rejected compatibility
+        # record must not read as an absent one that permits unchecked adoption.
         self._turn_id: str | None = None
         self._submitting = False
         self._turn_known = asyncio.Event()
@@ -98,6 +100,10 @@ class CodexHarness:
         self._total: dict[str, int] = {}
         self._usage_baseline_known = True
         self._manifest_path = config.state_dir / "openinspect-state.json"
+        # A rejected manifest is kept here, not deleted, until a fresh thread
+        # replaces it: a rejected record must never read as an absent one, even
+        # after a restart.
+        self._rejected_manifest_path = config.state_dir / "openinspect-state.rejected.json"
         self._tool_client = ControlPlaneToolClient(config.tools, log) if config.tools else None
         self._tools = CodexTools(self._tool_client) if self._tool_client else None
         self._mcp: dict[str, Any] = {}
@@ -266,7 +272,7 @@ class CodexHarness:
             self.session_id = None
             self._total = {}
             self._usage_baseline_known = False
-            self._manifest_path.unlink(missing_ok=True)
+            self._manifest_path.replace(self._rejected_manifest_path)
 
     async def _resume_native(self, thread_id: str) -> bool:
         assert self._client is not None
@@ -288,6 +294,12 @@ class CodexHarness:
     async def resume_session(self, persisted_id: str) -> bool:
         if persisted_id == self.session_id:
             return True
+        if self._rejected_manifest_path.exists():
+            # The bridge's persisted id names the thread whose manifest was just
+            # rejected (catalog/version change); adopting it would certify an
+            # incompatible native tool set. The next prompt starts a new thread.
+            self.log.warn("codex.session.adoption_refused")
+            return False
         # A transport error leaves the outcome unknown: it propagates with the
         # current state and manifest intact, so a later open() can retry.
         try:
@@ -327,6 +339,7 @@ class CodexHarness:
             )
             self.session_id = result["thread"]["id"]
             self._persist()
+            self._rejected_manifest_path.unlink(missing_ok=True)
 
     def _model(self, selected: str | None) -> str:
         # Model/effort compatibility is owned by control-plane admission.
@@ -365,12 +378,18 @@ class CodexHarness:
                     directory.mkdir(exist_ok=True, mode=0o700)
                     path = directory / uuid.uuid4().hex
                     data = base64.b64decode(attachment["content"], validate=True)
+                    # Registered first so cleanup also removes a partial write.
+                    paths.append(path)
                     path.write_bytes(data)
                     path.chmod(0o600)
-                    paths.append(path)
                     inputs.append({"type": "localImage", "path": str(path)})
                 if asyncio.get_running_loop().time() >= deadline:
                     raise TimeoutError
+                # Durably distrust the baseline while native work may run: a crash
+                # mid-turn must not bill unobserved usage to the next message.
+                baseline_known = self._usage_baseline_known
+                self._usage_baseline_known = False
+                self._persist()
                 self._submitting = True
                 self._turn_known.clear()
                 response = await self._client.request(
@@ -395,7 +414,7 @@ class CodexHarness:
                     self._turn_id,
                     model,
                     self._total,
-                    baseline_known=self._usage_baseline_known,
+                    baseline_known=baseline_known,
                 )
                 await emit(state.start())
                 # The transport queue retains notifications delivered before the
@@ -446,10 +465,21 @@ class CodexHarness:
                 else "Codex process containment could not be confirmed",
                 message_cost_usd=0,
             )
+        except OpenAIAccessTokenUnavailable:
+            # Transient (timeout, 5xx, 429): a plain retry can succeed, so do not
+            # send the user to Settings.
+            if not await self.stop_execution(STOP_TIMEOUT_SECONDS):
+                return TurnOutcome.failed(
+                    "Codex process containment could not be confirmed",
+                    message_cost_usd=0,
+                )
+            return TurnOutcome.failed(
+                "Codex could not obtain a credential right now; retry shortly",
+                message_cost_usd=0,
+            )
         except (
             CodexRpcError,
             OpenAIAccessTokenDenied,
-            OpenAIAccessTokenUnavailable,
             HarnessStartError,
         ):
             if not await self.stop_execution(STOP_TIMEOUT_SECONDS):
@@ -585,7 +615,13 @@ class CodexHarness:
     async def reauthenticate_generation(self, generation: dict[str, Any]) -> None:
         if not await self.stop_execution(STOP_TIMEOUT_SECONDS):
             raise RuntimeError("Codex process containment could not be confirmed")
-        await self.open()
+        # The stopped turn unwinds (and runs its own cleanup) before the turn lock
+        # is free; reopening under it means that cleanup cannot stop the new
+        # client, and queued prompts start only on the reauthenticated process.
+        async with self._turn_lock:
+            if not await self.stop_execution(STOP_TIMEOUT_SECONDS):
+                raise RuntimeError("Codex process containment could not be confirmed")
+            await self.open()
 
     def _persist(self) -> None:
         payload = {

@@ -6,7 +6,8 @@ import json
 import time
 from typing import Any
 
-MAX_TOOL_TEXT = 64 * 1024
+from ..tool_results import content_text
+
 # Even non-BMP characters expand to at most 12 JSON bytes each. Leave ample
 # room for event identity/timestamps below the bridge's one-megabyte limit.
 MAX_ASSISTANT_TEXT_CHARS = 64 * 1024
@@ -41,6 +42,22 @@ def _token_counts(value: Any) -> dict[str, int] | None:
     ):
         return None
     return counts
+
+
+def _tool_output(kind: str, item: dict[str, Any]) -> str:
+    """Project a native tool result onto the bridge's text-output contract."""
+    if kind == "dynamicToolCall":
+        return content_text(item.get("contentItems"))
+    if kind == "mcpToolCall":
+        error = item.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])
+        result = item.get("result")
+        if isinstance(result, dict):
+            return content_text(result.get("content"))
+        return content_text(result)
+    output = item.get("aggregatedOutput") or item.get("result") or ""
+    return output if isinstance(output, str) else json.dumps(output)
 
 
 class CodexTurnEvents:
@@ -96,14 +113,18 @@ class CodexTurnEvents:
         }
 
     def accept(self, frame: dict[str, Any]) -> list[dict[str, Any]]:
-        method, params = frame.get("method"), frame.get("params", {})
+        method, params = frame.get("method"), frame.get("params")
+        # Frames come from a separate process: tolerate null/non-object fields.
+        if not isinstance(params, dict):
+            return []
         if params.get("threadId") != self.thread_id:
             return []
-        turn_id = params.get("turnId") or params.get("turn", {}).get("id")
+        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        turn_id = params.get("turnId") or turn.get("id")
         if turn_id != self.turn_id:
             return []
         if method == "turn/completed":
-            self.status = params.get("turn", {}).get("status")
+            self.status = turn.get("status")
             return self._text_event(force=True)
         if method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage")
@@ -141,14 +162,22 @@ class CodexTurnEvents:
             self._record_text(item_id, str(params.get("delta", "")))
             return self._text_event()
         if method in {"item/started", "item/completed"}:
-            item = params.get("item", {})
+            item = params.get("item") if isinstance(params.get("item"), dict) else {}
             kind, item_id = item.get("type"), str(item.get("id"))
             if kind == "agentMessage":
                 if method == "item/completed":
                     self._record_text(item_id, str(item.get("text", "")), replace=True)
                     return self._text_event(force=True)
             elif kind == "contextCompaction":
-                return [{"type": "context_compacted", "messageId": self.message_id}]
+                if method == "item/started":
+                    return []
+                # One boundary: flush pre-compaction text, mark the boundary, then
+                # start a fresh segment. The turn-wide display budget is retained.
+                events = self._text_event(force=True)
+                events.append({"type": "context_compacted", "messageId": self.message_id})
+                self.text = {}
+                self._last_text = ""
+                return events
             elif kind in {
                 "commandExecution",
                 "fileChange",
@@ -179,16 +208,8 @@ class CodexTurnEvents:
                     args = {key: action[key] for key in fields if action.get(key) is not None}
                     if tool == "websearch" and not args.get("query"):
                         args["query"] = item.get("query", "")
-                if len(json.dumps(args)) > MAX_TOOL_TEXT:
-                    args = {"truncated": True}
-                output = (
-                    item.get("aggregatedOutput")
-                    or item.get("result")
-                    or item.get("contentItems")
-                    or ""
-                )
-                if not isinstance(output, str):
-                    output = json.dumps(output)
+                # Transport sizing belongs to EventForwarder (event_size.truncate_tool_call).
+                output = _tool_output(kind, item)
                 status = "running" if method == "item/started" else "completed"
                 if item.get("status") in {"failed", "declined"} or item.get("success") is False:
                     status = "error"
@@ -200,7 +221,7 @@ class CodexTurnEvents:
                         "tool": tool,
                         "args": args,
                         "status": status,
-                        "output": output[:MAX_TOOL_TEXT],
+                        "output": output,
                     }
                 ]
         # Raw reasoning and unrelated collaborator events are not assistant text.
