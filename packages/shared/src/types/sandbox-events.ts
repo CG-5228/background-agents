@@ -3,6 +3,7 @@ import { harnessIdSchema } from "../harnesses";
 import { sessionDiffBaselineRepositorySchema } from "./session-diffs";
 import { resolvedSessionAttachmentsSchema } from "./session-attachments";
 import { githubAutofixOriginSchema } from "./github-autofix";
+import { stepPricingSchema } from "./usage";
 
 const recordSchema = z.record(z.string(), z.unknown());
 const gitSyncStatusSchema = z.enum(["pending", "in_progress", "completed", "failed"]);
@@ -155,6 +156,7 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     stepId: stepIdSchema,
     /** Cost of this step alone; absent when the runtime could not price it. */
     cost: z.number().nullable().optional(),
+    pricing: stepPricingSchema.optional(),
     /** Cumulative reported cost of the whole turn so far; idempotent on resend. */
     messageCostUsd: z.number().nonnegative().optional(),
     tokens: tokenUsageSchema.optional(),

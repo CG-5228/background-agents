@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import time
+from copy import deepcopy
 from typing import Any
 
 from ..tool_results import content_text
+from .pricing import price_codex_usage
 
 # Even non-BMP characters expand to at most 12 JSON bytes each. Leave ample
 # room for event identity/timestamps below the bridge's one-megabyte limit.
@@ -70,6 +73,7 @@ class CodexTurnEvents:
         baseline: dict[str, int],
         *,
         baseline_known: bool = True,
+        pricing_model: dict[str, Any] | None = None,
     ) -> None:
         self.message_id, self.thread_id, self.turn_id = message_id, thread_id, turn_id
         self.model = model
@@ -90,6 +94,10 @@ class CodexTurnEvents:
         self.tokens: dict[str, Any] | None = None
         self.usage_valid = True
         self.has_usage = False
+        self.pricing_model = deepcopy(pricing_model)
+        self.message_cost_usd: float | None = None
+        self.cost_complete = self.baseline_known
+        self._pricing_allowed = self.baseline_known
 
     def start(self) -> dict[str, Any]:
         return {
@@ -106,9 +114,25 @@ class CodexTurnEvents:
             "stepId": self.step_id,
             "model": f"openai/{self.model}",
             **({"tokens": self.tokens} if self.tokens is not None else {}),
-            # Native turn events report tokens, not dollar costs.
-            "cost": 0,
-            "messageCostUsd": 0,
+            "cost": self.message_cost_usd if self.cost_complete else None,
+            **(
+                {"messageCostUsd": self.message_cost_usd}
+                if self.message_cost_usd is not None
+                else {}
+            ),
+            **(
+                {
+                    "pricing": {
+                        "source": "models.dev",
+                        "model": f"openai/{self.model}",
+                        "rates": deepcopy(self.pricing_model["cost"]),
+                    }
+                }
+                if self.message_cost_usd is not None
+                and self.pricing_model is not None
+                and isinstance(self.pricing_model.get("cost"), dict)
+                else {}
+            ),
             "reason": self.status or "unknown",
         }
 
@@ -119,16 +143,25 @@ class CodexTurnEvents:
             return []
         if params.get("threadId") != self.thread_id:
             return []
-        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        turn = params.get("turn")
+        if not isinstance(turn, dict):
+            turn = {}
         turn_id = params.get("turnId") or turn.get("id")
         if turn_id != self.turn_id:
             return []
         if method == "turn/completed":
             self.status = turn.get("status")
             return self._text_event(force=True)
+        if method == "model/rerouted":
+            # Token snapshots do not identify which response used the new model.
+            self.cost_complete = False
+            self._pricing_allowed = False
+            return [self.finish()]
         if method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage")
-            total = _token_counts(usage.get("total") if isinstance(usage, dict) else None)
+            if not isinstance(usage, dict):
+                return self._invalid_usage()
+            total = _token_counts(usage.get("total"))
             if (
                 not self.usage_valid
                 or total is None
@@ -138,6 +171,26 @@ class CodexTurnEvents:
             counts = {k: total[k] - self.baseline[k] for k in TOKEN_FIELDS}
             if self.baseline_known and _token_counts(counts) is None:
                 return self._invalid_usage()
+            increment = {k: total[k] - self.total[k] for k in TOKEN_FIELDS}
+            if self._pricing_allowed:
+                if increment["totalTokens"] == 0 and not any(increment.values()):
+                    if self.message_cost_usd is None and counts["totalTokens"] == 0:
+                        self.message_cost_usd = 0.0
+                else:
+                    # `last` is per response, not per turn. Matching it to the
+                    # increment excludes replay gaps and synthetic context counts
+                    # and lets context tiers apply to each request independently.
+                    last = _token_counts(usage.get("last"))
+                    amount = (
+                        price_codex_usage(self.pricing_model, increment)
+                        if last == increment
+                        else None
+                    )
+                    updated = (self.message_cost_usd or 0.0) + (amount or 0.0)
+                    if amount is None or not math.isfinite(updated):
+                        self.cost_complete = False
+                    else:
+                        self.message_cost_usd = updated
             self.total = total
             self.has_usage = True
             if not self.baseline_known:
@@ -162,19 +215,25 @@ class CodexTurnEvents:
             self._record_text(item_id, str(params.get("delta", "")))
             return self._text_event()
         if method in {"item/started", "item/completed"}:
-            item = params.get("item") if isinstance(params.get("item"), dict) else {}
+            item = params.get("item")
+            if not isinstance(item, dict):
+                return []
             kind, item_id = item.get("type"), str(item.get("id"))
             if kind == "agentMessage":
                 if method == "item/completed":
                     self._record_text(item_id, str(item.get("text", "")), replace=True)
                     return self._text_event(force=True)
             elif kind == "contextCompaction":
+                # Native remote compaction is billable but its usage is omitted
+                # from thread totals. Do not present the observed subtotal as complete.
+                self.cost_complete = False
                 if method == "item/started":
-                    return []
+                    return [self.finish()]
                 # One boundary: flush pre-compaction text, mark the boundary, then
                 # start a fresh segment. The turn-wide display budget is retained.
                 events = self._text_event(force=True)
                 events.append({"type": "context_compacted", "messageId": self.message_id})
+                events.append(self.finish())
                 self.text = {}
                 self._last_text = ""
                 return events
@@ -229,6 +288,7 @@ class CodexTurnEvents:
 
     def _invalid_usage(self) -> list[dict[str, Any]]:
         self.usage_valid = False
+        self.cost_complete = False
         self.has_usage = False
         self.tokens = None
         return [self.finish()]
