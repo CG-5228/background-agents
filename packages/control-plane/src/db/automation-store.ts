@@ -5,7 +5,6 @@
  * snake_case rows in the database, camelCase types at the API boundary.
  */
 
-import { bindRetryReservations } from "./automation-retries";
 import { isWorkspaceAdmin, WORKSPACE_ADMIN_ROLE_KEYS } from "@open-inspect/shared/rbac";
 import {
   DEFAULT_HARNESS,
@@ -29,6 +28,7 @@ import {
   type AutomationTriggerType,
   type TriggerConfig,
 } from "@open-inspect/shared/triggers";
+import { bindRetryReservations, bindWithdrawIneligibleRetries } from "./automation-retries";
 import {
   toProviderSelections,
   type AutomationModelProviderAuthRow,
@@ -291,6 +291,7 @@ export interface InvocationRunAggregate {
   skipped: number;
   lastCompletedAt: number | null;
   retrying?: number;
+  failureCountingDeferred?: boolean;
 }
 
 // ─── Mappers ─────────────────────────────────────────────────────────────────
@@ -379,7 +380,7 @@ export function toAutomationRun(row: EnrichedRunRow): AutomationRun {
 const DERIVED_INVOCATION_STATUS_SQL = `CASE
   WHEN COUNT(r.id) = 0 THEN 'skipped'
   WHEN SUM(CASE WHEN r.status = 'retrying' THEN 1 ELSE 0 END) > 0 THEN 'retrying'
-  WHEN SUM(CASE WHEN r.status IN ('starting', 'running', 'retrying') THEN 1 ELSE 0 END) > 0 THEN
+  WHEN SUM(CASE WHEN r.status IN ('starting', 'running') THEN 1 ELSE 0 END) > 0 THEN
     CASE
       WHEN SUM(CASE WHEN r.status <> 'starting' THEN 1 ELSE 0 END) = 0 THEN 'starting'
       ELSE 'running'
@@ -739,8 +740,8 @@ export class AutomationStore {
   async update(id: string, fields: Partial<AutomationRow>): Promise<AutomationRow | null> {
     const statement = this.bindAutomationUpdate(id, fields);
     if (statement) {
-      if (fields.max_retries === 0 || fields.enabled === 0)
-        await this.db.batch([statement, this.bindWithdrawRetries(id)]);
+      if (fields.max_retries !== undefined || fields.enabled !== undefined)
+        await this.db.batch([statement, this.bindWithdrawIneligibleRetries(id)]);
       else await statement.run();
     }
     return this.getById(id);
@@ -791,15 +792,9 @@ export class AutomationStore {
       );
   }
 
-  /** Withdraw pending attempts in the same transaction as a pause, delete, or retry disable. */
-  bindWithdrawRetries(id: string, now = Date.now()): SqlStatement {
-    return this.db
-      .prepare(
-        `UPDATE automation_runs
-      SET status = 'failed', retry_at = NULL, retryable = 0, retry_withdrawn_at = ?, completed_at = ?
-      WHERE automation_id = ? AND status = 'retrying'`
-      )
-      .bind(now, now, id);
+  /** Withdraw attempts excluded by current policy in the same transaction as policy edits. */
+  bindWithdrawIneligibleRetries(id: string, now = Date.now()): SqlStatement {
+    return bindWithdrawIneligibleRetries(this.db, now, id);
   }
 
   /** Build a soft-delete statement for composition in an atomic batch. */
@@ -813,7 +808,10 @@ export class AutomationStore {
 
   /** Soft-delete an automation and report whether a live row changed. */
   async softDelete(id: string): Promise<boolean> {
-    const [result] = await this.db.batch([this.bindSoftDelete(id), this.bindWithdrawRetries(id)]);
+    const [result] = await this.db.batch([
+      this.bindSoftDelete(id),
+      this.bindWithdrawIneligibleRetries(id),
+    ]);
     return (result.meta?.changes ?? 0) > 0;
   }
 
@@ -828,7 +826,10 @@ export class AutomationStore {
 
   /** Pause an automation and report whether a live row changed. */
   async pause(id: string): Promise<boolean> {
-    const [result] = await this.db.batch([this.bindPause(id), this.bindWithdrawRetries(id)]);
+    const [result] = await this.db.batch([
+      this.bindPause(id),
+      this.bindWithdrawIneligibleRetries(id),
+    ]);
     return (result.meta?.changes ?? 0) > 0;
   }
 
@@ -1181,7 +1182,8 @@ export class AutomationStore {
     const statement = this.db
       .prepare(
         `UPDATE automation_runs
-         SET status = 'failed', failure_reason = ?, completed_at = ?
+         SET status = 'failed', failure_reason = ?, completed_at = ?,
+             retryable = CASE WHEN status = 'starting' AND session_id IS NULL THEN 1 ELSE 0 END
          WHERE id IN (${placeholders}) AND status = ?`
       )
       .bind(reason, completedAt, ...runIds, status);
@@ -1341,7 +1343,7 @@ export class AutomationStore {
             child.repo_id,
             child.base_branch,
             child.environment_id,
-            child.retryable ?? 0,
+            child.retryable ?? (child.status === "failed" && child.session_id === null ? 1 : 0),
             child.target_resolved ?? 1,
             invocation.id
           )
@@ -1668,7 +1670,8 @@ export class AutomationStore {
            COALESCE(SUM(CASE WHEN status = 'retrying' OR
              (status IN ('starting', 'running') AND EXISTS
                (SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id AND a.max_retries > 0))
-             THEN 1 ELSE 0 END), 0) AS retrying,
+             THEN 1 ELSE 0 END), 0) AS failure_counting_deferred,
+           COALESCE(SUM(CASE WHEN status = 'retrying' THEN 1 ELSE 0 END), 0) AS retrying,
            MAX(completed_at) AS last_completed_at
          FROM automation_runs WHERE invocation_id = ? AND superseded_at IS NULL`
       )
@@ -1681,6 +1684,7 @@ export class AutomationStore {
         skipped: number;
         last_completed_at: number | null;
         retrying: number;
+        failure_counting_deferred: number;
       }>();
 
     return {
@@ -1691,6 +1695,7 @@ export class AutomationStore {
       skipped: row?.skipped ?? 0,
       lastCompletedAt: row?.last_completed_at ?? null,
       retrying: row?.retrying ?? 0,
+      failureCountingDeferred: (row?.failure_counting_deferred ?? 0) > 0,
     };
   }
 

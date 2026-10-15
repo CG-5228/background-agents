@@ -2206,6 +2206,19 @@ describe("SessionMessageQueue", () => {
       expect.any(Number),
       "processing"
     );
+    await h.backgroundTasks.settle();
+    expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
+      "msg-pending",
+      false,
+      "Execution was cancelled before it started",
+      true
+    );
+    expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
+      "msg-processing",
+      false,
+      "Execution was cancelled",
+      true
+    );
   });
 
   it("fails the named pending prompt with the boot failure and leaves the rest queued", async () => {

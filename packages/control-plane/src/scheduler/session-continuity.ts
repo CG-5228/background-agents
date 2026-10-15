@@ -37,6 +37,7 @@ const SESSION_CONTINUITY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  */
 const HELD_PROMPT_RETRY_MS = 2 * 60 * 1000;
 const HELD_PROMPT_SWEEP_LIMIT = 50;
+const MAX_CONTINUATION_ATTEMPTS = 3;
 
 /**
  * The clientRequestId of a run's own first prompt: the session can say whether it took
@@ -118,10 +119,12 @@ export async function continueSession(
   now: number,
   policy: ContinuationPolicy
 ): Promise<ContinuationOutcome> {
-  for (;;) {
+  let invocationId: string | undefined;
+  for (let attempt = 0; attempt < MAX_CONTINUATION_ATTEMPTS; attempt++) {
     const run = await deps.store.getLatestContinuableRun(automation.id, concurrencyKey);
     if (!run || run.last_activity_at < now - SESSION_CONTINUITY_WINDOW_MS)
       return { kind: "fall_through" };
+    invocationId = run.invocation_id;
     if (!holdsFollowUps(run)) return continueRunSession(deps, run, policy);
 
     const held = await holdFollowUp(deps, run, policy);
@@ -129,6 +132,17 @@ export async function continueSession(
     // Launch or retry ownership changed while the prompt was built. Re-read the current
     // attempt rather than letting an accepted thread reply fall through to trigger matching.
   }
+  await policy.releaseDelivery?.();
+  deps.log.warn("Follow-up continuity did not stabilize", {
+    event: "scheduler.continuity_unstable",
+    automation_id: automation.id,
+  });
+  return {
+    kind: "refused",
+    invocationId: invocationId!,
+    status: null,
+    code: "continuity_unstable",
+  };
 }
 
 /**

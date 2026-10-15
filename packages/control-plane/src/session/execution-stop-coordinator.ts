@@ -44,7 +44,7 @@ export class ExecutionStopCoordinator {
     const processingMessage = this.messageRepository.getProcessingMessageWithCreatedAt();
     const stopConfirmationDeadline = now + STOP_CONFIRMATION_TIMEOUT_MS;
     const failure = processingMessage
-      ? this.messageFailures.record(processingMessage.id, reason, now, "processing")
+      ? this.messageFailures.record(processingMessage.id, reason, now, "processing", true)
       : null;
     if (!failure) return null;
     this.messageRepository.markMessageAwaitingStopConfirmation(

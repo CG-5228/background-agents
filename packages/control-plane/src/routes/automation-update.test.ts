@@ -180,7 +180,7 @@ describe("automation read, update, and delete routes", () => {
           expect.objectContaining({ max_retries: maxRetries })
         );
       }
-      expect(mockStore.bindWithdrawRetries).toHaveBeenCalledTimes(1);
+      expect(mockStore.bindWithdrawIneligibleRetries).toHaveBeenCalledTimes(2);
       expect(mockBatch).toHaveBeenLastCalledWith([
         { sql: "update-automation" },
         { sql: "withdraw-retries" },

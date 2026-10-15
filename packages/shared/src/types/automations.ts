@@ -117,6 +117,9 @@ export type AutomationRepositoryInput = RepositoryInput;
 export const automationRepositoriesInputSchema = repositoriesInputSchema;
 
 export const MAX_AUTOMATION_RETRIES = 5;
+
+/** Initial backoff for retryable automation failures; later attempts double it. */
+export const AUTOMATION_RETRY_DELAY_MS = 2 * 60 * 1000;
 const maxRetriesSchema = z.number().int().min(0).max(MAX_AUTOMATION_RETRIES);
 
 const automationSchema = z.object({

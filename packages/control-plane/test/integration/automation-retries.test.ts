@@ -1,11 +1,8 @@
+import { AUTOMATION_RETRY_DELAY_MS } from "@open-inspect/shared/types/automations";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { AutomationStore, type AutomationRunRow } from "../../src/db/automation-store";
-import {
-  AUTOMATION_RETRY_DELAY_MS,
-  claimRetry as claimPendingRetry,
-  getDueRetries,
-} from "../../src/db/automation-retries";
+import { claimRetry as claimPendingRetry, listDueRetries } from "../../src/db/automation-retries";
 import { Scheduler } from "../../src/scheduler/scheduler";
 import { createCloudflareEnv } from "../../src/cloudflare/platform";
 import { cleanD1Tables } from "./cleanup";
@@ -65,8 +62,8 @@ describe("automation job retries (real D1)", () => {
     expect(run.retry_at).toBe(
       (await store.getRunById("auto", "first"))!.completed_at! + AUTOMATION_RETRY_DELAY_MS
     );
-    expect(await getDueRetries(env.DB, run.retry_at! - 1, 25)).toEqual([]);
-    expect(await getDueRetries(env.DB, run.retry_at!, 25)).toHaveLength(1);
+    expect(await listDueRetries(env.DB, run.retry_at! - 1, 25)).toEqual([]);
+    expect(await listDueRetries(env.DB, run.retry_at!, 25)).toHaveLength(1);
     expect((await store.getInvocation("auto", "inv"))?.status).toBe("retrying");
     expect((await store.getInvocation("auto", "inv"))?.completedAt).toBeNull();
     expect((await store.getActiveRunForAutomation("auto"))?.id).toBe("first:retry");
@@ -137,7 +134,7 @@ describe("automation job retries (real D1)", () => {
       failure_reason: "Final failure",
       retryable: 1,
     });
-    expect(await getDueRetries(env.DB, due + 10 * AUTOMATION_RETRY_DELAY_MS, 25)).toEqual([]);
+    expect(await listDueRetries(env.DB, due + 10 * AUTOMATION_RETRY_DELAY_MS, 25)).toEqual([]);
     expect((await store.getInvocation("auto", "inv"))?.status).toBe("failed");
     expect((await store.getRunById("auto", "first:retry"))?.failure_reason).toBe("Final failure");
     expect(await store.getInvocationRunAggregate("inv")).toMatchObject({ total: 1, failed: 1 });
@@ -206,9 +203,10 @@ describe("automation job retries (real D1)", () => {
         messageId: "first-message",
         success: false,
         error: reason,
+        cancelled: true,
       });
       expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
-      expect(await getDueRetries(env.DB, Date.now() + AUTOMATION_RETRY_DELAY_MS, 25)).toEqual([]);
+      expect(await listDueRetries(env.DB, Date.now() + AUTOMATION_RETRY_DELAY_MS, 25)).toEqual([]);
     }
   );
 
@@ -223,7 +221,7 @@ describe("automation job retries (real D1)", () => {
     await env.DB.prepare("UPDATE sessions SET status = 'cancelled' WHERE id = 'old-session'").run();
     const due = (await store.getRunById("auto", "first:retry"))!.retry_at!;
     expect(await claimRetry(env.DB, "first", due)).toBeNull();
-    expect(await getDueRetries(env.DB, due, 25)).toEqual([]);
+    expect(await listDueRetries(env.DB, due, 25)).toEqual([]);
     expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
   });
 
@@ -279,7 +277,7 @@ describe("automation job retries (real D1)", () => {
       if (change === "delete") await store.softDelete("auto");
       if (change === "disable retries") await store.update("auto", { max_retries: 0 });
       expect(await claimRetry(env.DB, "first", Date.now() + AUTOMATION_RETRY_DELAY_MS)).toBeNull();
-      expect(await getDueRetries(env.DB, Date.now() + AUTOMATION_RETRY_DELAY_MS, 25)).toEqual([]);
+      expect(await listDueRetries(env.DB, Date.now() + AUTOMATION_RETRY_DELAY_MS, 25)).toEqual([]);
       expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
     }
   );

@@ -1,9 +1,7 @@
+import { z } from "zod";
+import { AUTOMATION_RETRY_DELAY_MS } from "@open-inspect/shared/types/automations";
 import type { SqlStatement, SqlDatabase } from "./sql-database";
 import type { AutomationRunRow } from "./automation-store";
-import { z } from "zod";
-
-/** First retry waits beyond the observed database stalls; subsequent retries back off. */
-export const AUTOMATION_RETRY_DELAY_MS = 2 * 60 * 1000;
 
 export const automationRetryContextSchema = z.object({
   instructions: z.string(),
@@ -30,8 +28,9 @@ export function bindRetryReservations(
       FROM automation_runs r JOIN automation_invocations i ON i.id = r.invocation_id
       JOIN automations a ON a.id = r.automation_id
       WHERE ${selector} AND r.status = 'failed' AND r.superseded_at IS NULL
-        AND r.retry_withdrawn_at IS NULL AND (r.retryable = 1 OR r.session_id IS NULL)
-        AND r.completed_at IS NOT NULL AND COALESCE(r.failure_reason, '') NOT LIKE '%cancel%'
+        AND r.retry_withdrawn_at IS NULL AND r.retryable = 1
+        AND r.completed_at IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = r.session_id AND s.status = 'cancelled')
         AND i.retry_context IS NOT NULL AND i.failure_counted_at IS NULL
         AND a.enabled = 1 AND a.deleted_at IS NULL AND r.attempt <= a.max_retries
         AND NOT EXISTS (SELECT 1 FROM automation_runs next WHERE next.retry_of_run_id = r.id)`
@@ -55,27 +54,44 @@ export function bindRetryReservations(
   ];
 }
 
-/** Clear pending retries when policy or explicit session cancellation withdraws permission. */
-export async function getDueRetries(
+/** The policy used for withdrawal, due reads, and claims, evaluated against current rows. */
+const RETRY_ELIGIBILITY_SQL = `
+  EXISTS (SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id
+    AND a.enabled = 1 AND a.deleted_at IS NULL AND automation_runs.attempt <= a.max_retries + 1)
+  AND NOT EXISTS (SELECT 1 FROM sessions s JOIN automation_runs previous ON previous.session_id = s.id
+    WHERE previous.id = automation_runs.retry_of_run_id AND s.status = 'cancelled')`;
+
+export function bindWithdrawIneligibleRetries(
+  db: SqlDatabase,
+  now: number,
+  automationId?: string
+): SqlStatement {
+  return db
+    .prepare(
+      `UPDATE automation_runs SET status = 'failed', retry_at = NULL,
+      retryable = 0, retry_withdrawn_at = ?, completed_at = ?
+    WHERE status = 'retrying' AND NOT (${RETRY_ELIGIBILITY_SQL})
+      ${automationId === undefined ? "" : "AND automation_id = ?"}`
+    )
+    .bind(now, now, ...(automationId === undefined ? [] : [automationId]));
+}
+
+/** Durably settle attempts whose policy or session cancellation withdrew permission. */
+export async function withdrawIneligibleRetries(db: SqlDatabase, now: number): Promise<void> {
+  await bindWithdrawIneligibleRetries(db, now).run();
+}
+
+/** Read eligible pending attempts; policy changes are settled by the explicit withdrawal step. */
+export async function listDueRetries(
   db: SqlDatabase,
   now: number,
   limit: number
 ): Promise<AutomationRunRow[]> {
-  await db
-    .prepare(
-      `UPDATE automation_runs SET status = 'failed', retry_at = NULL, retryable = 0, retry_withdrawn_at = ?, completed_at = ?
-     WHERE status = 'retrying' AND (
-       NOT EXISTS (SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id
-         AND a.enabled = 1 AND a.deleted_at IS NULL AND automation_runs.attempt <= a.max_retries + 1)
-       OR EXISTS (SELECT 1 FROM sessions s JOIN automation_runs previous ON previous.session_id = s.id
-         WHERE previous.id = automation_runs.retry_of_run_id AND s.status = 'cancelled'))`
-    )
-    .bind(now, now)
-    .run();
   const result = await db
     .prepare(
-      `SELECT * FROM automation_runs WHERE status = 'retrying' AND retry_at <= ?
-     ORDER BY retry_at, id LIMIT ?`
+      `SELECT * FROM automation_runs
+    WHERE status = 'retrying' AND retry_at <= ? AND (${RETRY_ELIGIBILITY_SQL})
+    ORDER BY retry_at, id LIMIT ?`
     )
     .bind(now, limit)
     .all<AutomationRunRow>();
@@ -95,10 +111,7 @@ export async function claimRetry(
       `UPDATE automation_runs SET status = 'starting', retry_at = NULL, created_at = ?, failure_reason = NULL,
       repo_owner = ?, repo_name = ?, repo_id = ?, base_branch = ?, target_resolved = ?
     WHERE id = ? AND status = 'retrying' AND retry_at <= ? AND retry_withdrawn_at IS NULL
-      AND EXISTS (SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id
-        AND a.enabled = 1 AND a.deleted_at IS NULL AND automation_runs.attempt <= a.max_retries + 1)
-      AND NOT EXISTS (SELECT 1 FROM sessions s JOIN automation_runs previous ON previous.session_id = s.id
-        WHERE previous.id = automation_runs.retry_of_run_id AND s.status = 'cancelled')
+      AND (${RETRY_ELIGIBILITY_SQL})
       ${grants ? "AND EXISTS (SELECT 1 FROM teams WHERE id = ? AND grants_version = ?)" : ""}`
     )
     .bind(

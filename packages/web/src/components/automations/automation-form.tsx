@@ -1,8 +1,10 @@
 "use client";
 
-import { MAX_AUTOMATION_RETRIES } from "@open-inspect/shared/types/automations";
-
 import { useCallback, useState, useMemo } from "react";
+import {
+  AUTOMATION_RETRY_DELAY_MS,
+  MAX_AUTOMATION_RETRIES,
+} from "@open-inspect/shared/types/automations";
 import { useRepos } from "@/hooks/use-repos";
 import { useEnvironments } from "@/hooks/use-environments";
 import { useResourceTeams } from "@/hooks/use-resource-teams";
@@ -272,8 +274,9 @@ export function AutomationForm({
           onChange={(event) => setMaxRetries(Number(event.target.value))}
         />
         <FieldDescription>
-          Retry failed runs after 2 minutes, doubling the delay each time. Zero disables retries.
-          Each attempt starts a new session and may repeat work done before the failure.
+          Retry failed runs after {AUTOMATION_RETRY_DELAY_MS / 60_000} minutes, doubling the delay
+          each time. Zero disables retries. Each attempt starts a new session and may repeat work
+          done before the failure.
         </FieldDescription>
       </div>
 

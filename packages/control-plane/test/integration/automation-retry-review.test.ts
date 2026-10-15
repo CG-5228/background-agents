@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { AutomationStore, type AutomationRunRow } from "../../src/db/automation-store";
-import { claimRetry as claimPendingRetry, getDueRetries } from "../../src/db/automation-retries";
+import { claimRetry as claimPendingRetry, listDueRetries } from "../../src/db/automation-retries";
 import { Scheduler } from "../../src/scheduler/scheduler";
 import { createCloudflareEnv } from "../../src/cloudflare/platform";
 import {
@@ -290,9 +290,9 @@ describe("automation retry review regressions (real D1)", () => {
     async (tick) => {
       const store = await seedPendingRetry();
       await store.pause("auto");
-      if (tick) await getDueRetries(env.DB, Date.now() + 120_000, 25);
+      if (tick) await listDueRetries(env.DB, Date.now() + 120_000, 25);
       await store.resume("auto", Date.now() + 86400_000);
-      expect(await getDueRetries(env.DB, Date.now() + 120_000, 25)).toEqual([]);
+      expect(await listDueRetries(env.DB, Date.now() + 120_000, 25)).toEqual([]);
       expect(await claimRetry(env.DB, "first", Date.now() + 120_000)).toBeNull();
       expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
     }
@@ -302,7 +302,7 @@ describe("automation retry review regressions (real D1)", () => {
     const store = await seedPendingRetry();
     await store.update("auto", { max_retries: 0 });
     await store.update("auto", { max_retries: 1 });
-    expect(await getDueRetries(env.DB, Date.now() + 120_000, 25)).toEqual([]);
+    expect(await listDueRetries(env.DB, Date.now() + 120_000, 25)).toEqual([]);
   });
 
   it.each(["repository", "changed environment"])(
