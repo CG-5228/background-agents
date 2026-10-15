@@ -488,6 +488,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     messages: messageRepository,
     failures: messageFailures,
     messenger,
+    events: eventRepository,
     sockets: wsManager,
     alarm: alarmScheduler,
     background: backgroundTasks,
@@ -682,6 +683,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     log,
     preserveBeforeWatchdogs: (allowCaptureRetry) =>
       lifecycleManager.handleShutdownAlarm(allowCaptureRetry),
+    redriveIdleQueue: () => lifecycleManager.redriveIdleQueue(),
   });
 
   const schedulePullRequestRefresh = (trigger: "open" | "manual"): void => {
@@ -1077,6 +1079,9 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
             await wsManager.expireAuthorizationLeases(Date.now());
             await alarmScheduler.rehydrate();
             await lifecycleManager.rearmRejectedStartupCleanupAlarm();
+            await lifecycleManager.rearmCaptureSettlement();
+            await lifecycleManager.replayPendingFatalReport();
+            await lifecycleManager.redriveIdleQueue();
             await terminalMessageProjection.rearm();
           },
           {
