@@ -71,6 +71,11 @@ export async function main(): Promise<void> {
     throw new Error(`OpenComputer candidate status is ${artifact.status}`);
   const sandbox = await Sandbox.create({ apiUrl, apiKey, snapshot: name });
   try {
+    if (!sandbox.endAt) {
+      throw new Error(
+        "OpenComputer verification sandbox omitted endAt; verify the organization's runtime pin uses v2"
+      );
+    }
     const report = await sandbox.exec.run(
       `sudo -E /opt/openinspect/python/bin/python /app/verify/smoke_test.py verify`,
       { env: providerEnvironment, timeout: 240, timeoutMs: 250_000 }

@@ -8,6 +8,51 @@ Use `sandbox_provider = "opencomputer"` when you want sessions to run in OpenCom
 while keeping the same Open-Inspect control plane, web app, GitHub OAuth, and Slack/GitHub
 integrations.
 
+## v2 Migration Status
+
+Issue [#2000](https://github.com/ColeMurray/background-agents/issues/2000) remains open until a
+rebuilt managed template and production shutdown/restore canary have passed. The SDK builder now
+uses `@opencomputer/sdk` v2, and the direct REST client sends `x-oc-sdk-version` to select the
+active runtime. OpenComputer keeps the existing `/api` routes; changing the URL to `/v2` is not the
+migration. The builder requires `endAt` on its verification sandbox before publishing the template
+reference. An organization runtime pin can override version-based routing.
+
+**The managed image still needs substrate compatibility work before production enablement.**
+OpenComputer's [template documentation](https://docs.opencomputer.dev/sandboxes/templates) describes
+Amazon Linux 2023 on ARM64. Our OpenComputer target in `packages/sandbox-images/targets.json` still
+selects Debian, and `install/install.sh` requires linux/amd64. The language and tool installers also
+pin amd64 archives, including Chrome for Testing. Upgrading the SDK does not resolve these image
+constraints. Do not switch the default provider on the strength of local HTTP contract tests.
+
+The [upstream migration guide](https://docs.opencomputer.dev/migrating-from-v1) also documents
+filesystem-only checkpoints, a hard host lifetime reported in `endAt`, and unavailable checkpoint
+forking. The provider uses disk-only captures, creates a replacement from the managed template,
+restores the checkpoint in place, and starts the runtime again. Hibernation does not extend the host
+lifetime. Old v1 templates must be rebuilt; existing names alone do not establish compatibility.
+
+### Provider Canary
+
+Once a compatible managed template has been built and verified, run the opt-in provider test with a
+dedicated test account/template:
+
+```bash
+export OPENCOMPUTER_API_KEY="osb_..."
+export OPENCOMPUTER_API_URL="https://app.opencomputer.dev/api"
+export OPENCOMPUTER_TEMPLATE="<rebuilt-managed-template>"
+OPENCOMPUTER_RUN_LIVE_TESTS=1 npm test -w @open-inspect/control-plane -- \
+  src/sandbox/opencomputer-live.test.ts --maxWorkers=1
+```
+
+This allocates paid resources. It uses the real REST provider to create, checkpoint, preserve-stop,
+restore, wake, and destroy sandboxes. It checks managed runtime smoke verification and sentinel
+files in both `/workspace` and `/home/sandbox`, then deletes the canary checkpoint and sandboxes. It
+supplies no model credentials and points the runtime at a loopback control-plane address. Cleanup
+errors fail the test; inspect the provider account after any interrupted run.
+
+The test is skipped unless explicitly enabled. It does not exercise the shutdown coordinator, a
+deployed session's WebSocket handshake, or a production Terraform apply. Those acceptance checks
+still require the production deployment and an actual session before changing the default provider.
+
 ## Configuration
 
 Set these values in `terraform/environments/production/terraform.tfvars`:

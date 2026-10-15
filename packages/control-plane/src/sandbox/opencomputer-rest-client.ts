@@ -535,6 +535,9 @@ export class OpenComputerRestClient {
     const authHeaderName = this.config.authHeaderName ?? "X-API-Key";
     return {
       "Content-Type": "application/json",
+      // Runtime selection uses the SDK major even for direct REST clients.
+      // Keep this protocol identity aligned with the managed template builder.
+      "x-oc-sdk-version": "2.3.1",
       [authHeaderName]: `${this.config.authHeaderValuePrefix ?? ""}${this.config.apiKey}`,
     };
   }
