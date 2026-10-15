@@ -42,7 +42,7 @@ export function createCloudflareEnv(bindings: WorkerBindings): Env {
     ...config
   } = bindings;
   const platform: Platform = {
-    DB: createD1SqlDatabase(DB),
+    DB: DB ? createD1SqlDatabase(DB) : DB,
     SESSION: createDurableObjectSessionRuntimeDispatch(SESSION),
     REPOS_CACHE: createKvCacheStore(REPOS_CACHE),
     MEDIA_BUCKET: new R2ObjectStorage(MEDIA_BUCKET),

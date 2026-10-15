@@ -44,6 +44,27 @@ export function registerSqlSetsConformanceSuite(factory: SqlDatabaseFactory) {
       });
     });
 
+    it.each([
+      1_000_000_000_000_000_100,
+      -1_000_000_000_000_000_100,
+      Number.MAX_SAFE_INTEGER + 1,
+      0.125,
+    ])("preserves direct numeric binding for %s", async (value) => {
+      await withTable(async (db) => {
+        await db.prepare("INSERT INTO set_rows VALUES (?, ?, ?)").bind(1, "direct", value).run();
+        await db.batch(bulkInsertStatements(db, "set_rows", [{ id: 2, label: "bulk", value }]));
+        // Inspect SQL text rather than converting the stored integer back to
+        // a JS number, which would round away the difference being tested.
+        const rows = await db
+          .prepare(
+            "SELECT typeof(value) AS type, CAST(value AS TEXT) AS value FROM set_rows ORDER BY id"
+          )
+          .all();
+        expect(rows.results).toHaveLength(2);
+        expect(rows.results[1]).toEqual(rows.results[0]);
+      });
+    });
+
     it("hydrates 101 identifiers with one parameterized set and accepts an empty set", async () => {
       await withTable(async (db) => {
         const labels = Array.from({ length: 101 }, (_, id) => `literal'"雪-${id}`);

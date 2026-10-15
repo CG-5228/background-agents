@@ -27,7 +27,7 @@ export function bulkInsertStatements(
     }
     return columns.map((column) => row[column]);
   });
-  // Binary/undefined/non-finite values retain the original binding behavior.
+  // Binary/undefined/non-finite values and unsafe integers retain ordinary binding.
   if (db.bulkInsert && valuesByRow.every((row) => row.every(isJsonScalar))) {
     return db.bulkInsert(table, columns, valuesByRow);
   }
@@ -59,6 +59,8 @@ function isJsonScalar(value: unknown): boolean {
     value === null ||
     typeof value === "string" ||
     typeof value === "boolean" ||
-    (typeof value === "number" && Number.isFinite(value))
+    (typeof value === "number" &&
+      Number.isFinite(value) &&
+      (!Number.isInteger(value) || Number.isSafeInteger(value)))
   );
 }
