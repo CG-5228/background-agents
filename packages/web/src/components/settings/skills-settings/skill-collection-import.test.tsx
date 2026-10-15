@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /// <reference types="@testing-library/jest-dom" />
 
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -191,7 +191,7 @@ describe("SkillImport collection mode", () => {
     await user.click(await screen.findByRole("option", { name: "acme/skills" }));
     await user.click(screen.getByRole("button", { name: "Preview collection" }));
     for (const environment of environments) {
-      await user.click(screen.getByRole("checkbox", { name: environment.name }));
+      fireEvent.click(screen.getByLabelText(environment.name));
     }
     expect(screen.getByRole("button", { name: "Import 1 skills" })).toBeDisabled();
 
