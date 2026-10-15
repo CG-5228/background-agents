@@ -8,6 +8,7 @@ import type { MessageRepository } from "../message-repository";
 import type { ArtifactRepository } from "../artifact-repository";
 import type { EventRepository } from "../event-repository";
 import type { SessionMessageQueue } from "../message-queue";
+import type { SessionPromptAdmission } from "../prompt-admission";
 import type { EnqueuePromptRequest } from "../enqueue-prompt-contract";
 import type { EventTimelineCursor } from "../event-cursor";
 import { SessionEventStream, toSessionEvent, type SessionEventListRequest } from "../event-stream";
@@ -41,7 +42,8 @@ interface MessageServiceDeps {
   eventRepository: EventRepository;
   artifactRepository: ArtifactRepository;
   usageRepository: UsageRepository;
-  messageQueue: SessionMessageQueue;
+  messageQueue: Pick<SessionMessageQueue, "processMessageQueue">;
+  promptAdmission: Pick<SessionPromptAdmission, "enqueueFromApi">;
   stopExecution: () => Promise<void>;
   parseArtifactMetadata: (
     artifact: Pick<ArtifactRow, "id" | "metadata">
@@ -115,10 +117,13 @@ export class MessageService {
     this.eventStream = new SessionEventStream(deps.eventRepository);
   }
 
-  enqueuePrompt(
+  async enqueuePrompt(
     request: EnqueuePromptRequest
   ): Promise<{ messageId: string; status: "queued"; deduplicated: boolean }> {
-    return this.deps.messageQueue.enqueuePromptFromApi(request);
+    const enqueued = await this.deps.promptAdmission.enqueueFromApi(request);
+    await this.deps.messageQueue.processMessageQueue();
+
+    return { messageId: enqueued.messageId, status: "queued", deduplicated: enqueued.deduplicated };
   }
 
   /** Whether the session queued a prompt under this clientRequestId. */

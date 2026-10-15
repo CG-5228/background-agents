@@ -29,7 +29,6 @@ import type { SessionWebSocketManager } from "./websocket-manager";
 import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import type { SessionStatusService } from "./session-status-service";
-import type { EnqueuePromptRequest } from "./enqueue-prompt-contract";
 import { getAvatarUrl } from "./participant-service";
 import { resolveParticipantName } from "./participant-name";
 import type { AlarmScheduler, BackgroundTasks } from "../platform-ports";
@@ -39,7 +38,7 @@ import { sandboxBootPhaseLogFields } from "../sandbox/boot-phase";
 import { resolveGitAuthorIdentity } from "./identity";
 import { validateReasoningEffort } from "./reasoning-effort";
 import { parseStoredSessionAttachments } from "./session-attachment-resolver";
-import type { PromptPolicy, SessionPromptAdmission } from "./prompt-admission";
+import type { PromptPolicy } from "./prompt-admission";
 
 const AUTOFIX_ATTEMPT_WINDOW_MS = 24 * 60 * 60 * 1_000;
 const STUCK_PROCESSING_ERROR = "Execution timed out (stuck processing)";
@@ -121,8 +120,7 @@ export class SessionMessageQueue {
       "recoverStopConfirmationTimeout" | "resumeAfterSandboxTermination"
     >,
     /** Resolved per use so it honors settings persisted after construction. */
-    private readonly getExecutionTimeoutMs: () => number,
-    private readonly admission: Pick<SessionPromptAdmission, "enqueueFromApi">
+    private readonly getExecutionTimeoutMs: () => number
   ) {}
 
   async enqueueAutofix(
@@ -550,15 +548,6 @@ export class SessionMessageQueue {
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
       ...(origin ? { origin } : {}),
     };
-  }
-
-  async enqueuePromptFromApi(
-    data: EnqueuePromptRequest
-  ): Promise<{ messageId: string; status: "queued"; deduplicated: boolean }> {
-    const enqueued = await this.admission.enqueueFromApi(data);
-    await this.processMessageQueue();
-
-    return { messageId: enqueued.messageId, status: "queued", deduplicated: enqueued.deduplicated };
   }
 
   /**

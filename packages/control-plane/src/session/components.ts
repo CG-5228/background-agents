@@ -577,8 +577,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     scmProviderName,
     alarmScheduler,
     executionStop,
-    getExecutionTimeoutMs,
-    promptAdmission
+    getExecutionTimeoutMs
   );
 
   // Tier 7 — services over the queue and lifecycle.
@@ -598,6 +597,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     artifactRepository,
     usageRepository,
     messageQueue,
+    promptAdmission,
     stopExecution: () => executionStop.stop(),
     parseArtifactMetadata: (artifact) => parseArtifactMetadata(artifact, log),
     transaction,

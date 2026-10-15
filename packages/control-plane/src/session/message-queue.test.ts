@@ -303,8 +303,7 @@ function buildQueue(
     "github",
     alarmScheduler,
     executionStop,
-    () => executionTimeoutMs,
-    admission
+    () => executionTimeoutMs
   );
   const clientCommands = new SessionClientCommandFacade(
     {} as never,
@@ -318,6 +317,7 @@ function buildQueue(
 
   return {
     queue,
+    admission,
     clientCommands,
     executionStop,
     sessionRepository,
@@ -352,7 +352,7 @@ describe("SessionMessageQueue", () => {
     );
     h.getProviderAuthenticationError.mockResolvedValue("This model has been disabled.");
     await expect(
-      h.queue.enqueuePromptFromApi({ content: "next", authorId: "user-1", source: "agent" })
+      h.admission.enqueueFromApi({ content: "next", authorId: "user-1", source: "agent" })
     ).rejects.toThrow("disabled");
     expect(h.repository.createMessageWithAttachments).not.toHaveBeenCalled();
     h.repository.getNextPendingMessage.mockReturnValueOnce(createMessage());
@@ -375,7 +375,7 @@ describe("SessionMessageQueue", () => {
       clientRequestId: "request-1",
     });
     await expect(
-      h.queue.enqueuePromptFromApi({ content: "Continue", authorId: "user-1", source: "agent" })
+      h.admission.enqueueFromApi({ content: "Continue", authorId: "user-1", source: "agent" })
     ).rejects.toMatchObject({ name: "SandboxPromptBlockedError" });
 
     expect(h.wsManager.send).toHaveBeenCalledWith(
@@ -1124,7 +1124,7 @@ describe("SessionMessageQueue", () => {
   it("touches the session index when an API prompt is queued", async () => {
     const h = buildQueue();
 
-    await h.queue.enqueuePromptFromApi({
+    await h.admission.enqueueFromApi({
       content: "follow-up",
       authorId: "user-1",
       source: "automation",
@@ -2408,7 +2408,7 @@ describe("SessionMessageQueue", () => {
     expect(h.sandboxLifecycle.spawnSandbox).not.toHaveBeenCalled();
   });
 
-  describe("enqueuePromptFromApi", () => {
+  describe("API admission", () => {
     it("returns the prompt it already queued for a client request id it has seen", async () => {
       const h = buildQueue();
       h.repository.getMessageByClientRequestId.mockReturnValue(
@@ -2419,7 +2419,7 @@ describe("SessionMessageQueue", () => {
         })
       );
 
-      const queued = await h.queue.enqueuePromptFromApi({
+      const queued = await h.admission.enqueueFromApi({
         content: "same",
         authorId: "user-1",
         source: "automation",
@@ -2447,7 +2447,7 @@ describe("SessionMessageQueue", () => {
           })
         );
 
-        const queued = await h.queue.enqueuePromptFromApi({
+        const queued = await h.admission.enqueueFromApi({
           content: "same",
           authorId: "user-1",
           source: "automation",
@@ -2466,7 +2466,7 @@ describe("SessionMessageQueue", () => {
       h.participantService.getByUserId.mockReturnValue(null as unknown as ParticipantRow);
 
       await expect(
-        h.queue.enqueuePromptFromApi({
+        h.admission.enqueueFromApi({
           content: "Continue",
           authorId: "new-user",
           source: "automation",
@@ -2487,7 +2487,7 @@ describe("SessionMessageQueue", () => {
       );
 
       await expect(
-        h.queue.enqueuePromptFromApi({
+        h.admission.enqueueFromApi({
           content: "changed",
           authorId: "user-1",
           source: "automation",
@@ -2504,7 +2504,7 @@ describe("SessionMessageQueue", () => {
       h.participantService.getByUserId.mockReturnValue(null as unknown as ParticipantRow);
 
       await expect(
-        h.queue.enqueuePromptFromApi({
+        h.admission.enqueueFromApi({
           content: "Continue",
           authorId: "new-user",
           source: "agent",
@@ -2521,7 +2521,7 @@ describe("SessionMessageQueue", () => {
       h.participantService.getByUserId.mockReturnValue(null as unknown as ParticipantRow);
 
       await expect(
-        h.queue.enqueuePromptFromApi({
+        h.admission.enqueueFromApi({
           content: "Continue",
           authorId: "new-user",
           source: "agent",
@@ -2560,7 +2560,7 @@ describe("SessionMessageQueue", () => {
         h.participantService.getByUserId.mockReturnValue(null as unknown as ParticipantRow);
 
         await expect(
-          h.queue.enqueuePromptFromApi({
+          h.admission.enqueueFromApi({
             content: "Continue",
             authorId: "user-1",
             source: "agent",
@@ -2595,7 +2595,7 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.participantService.getByUserId.mockReturnValue(null as unknown as ParticipantRow);
 
-      await h.queue.enqueuePromptFromApi({
+      await h.admission.enqueueFromApi({
         content: "Fix bug",
         authorId: "github:1001",
         source: "github",
@@ -2614,7 +2614,7 @@ describe("SessionMessageQueue", () => {
       const h = buildQueue();
       h.participantService.getByUserId.mockReturnValue(null as unknown as ParticipantRow);
 
-      await h.queue.enqueuePromptFromApi({
+      await h.admission.enqueueFromApi({
         content: "Fix bug",
         authorId: "github:1001",
         source: "github",
@@ -2626,7 +2626,7 @@ describe("SessionMessageQueue", () => {
     it("updates stored SCM identity after successful enrichment", async () => {
       const h = buildQueue();
 
-      await h.queue.enqueuePromptFromApi({
+      await h.admission.enqueueFromApi({
         content: "Fix bug",
         authorId: "github:1001",
         source: "github",
@@ -2650,7 +2650,7 @@ describe("SessionMessageQueue", () => {
     it("leaves stored enrichment unchanged when no snapshot is provided", async () => {
       const h = buildQueue();
 
-      await h.queue.enqueuePromptFromApi({
+      await h.admission.enqueueFromApi({
         content: "Fix bug",
         authorId: "github:1001",
         source: "github",
