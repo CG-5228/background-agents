@@ -43,3 +43,48 @@ describe("classified webhook repository failures", () => {
     ).rejects.toMatchObject({ status: 503, cause });
   });
 });
+
+describe("webhook branch Unicode validation", () => {
+  it.each(["release/\uD800", "release/\uDFFF"])(
+    "rejects an unpaired surrogate before SCM lookup: %j",
+    async (branch) => {
+      const provider = {
+        checkRepositoryAccess: vi.fn().mockResolvedValue({
+          repoOwner: "acme",
+          repoName: "api",
+          repoId: 1,
+          defaultBranch: "main",
+        }),
+        getBranchHead: vi.fn().mockImplementation(async ({ branch }) => encodeURIComponent(branch)),
+      };
+      await expect(
+        resolveWebhookRepository(
+          config,
+          { owner: "acme", name: "api", branch },
+          provider as unknown as SourceControlProvider
+        )
+      ).rejects.toMatchObject({ status: 400 });
+      expect(provider.checkRepositoryAccess).not.toHaveBeenCalled();
+      expect(provider.getBranchHead).not.toHaveBeenCalled();
+    }
+  );
+  it("accepts a well-formed surrogate pair in a branch", async () => {
+    const branch = "release/🚀";
+    const provider = {
+      checkRepositoryAccess: vi.fn().mockResolvedValue({
+        repoOwner: "acme",
+        repoName: "api",
+        repoId: 1,
+        defaultBranch: "main",
+      }),
+      getBranchHead: vi.fn().mockImplementation(async ({ branch }) => encodeURIComponent(branch)),
+    };
+    await expect(
+      resolveWebhookRepository(
+        config,
+        { owner: "acme", name: "api", branch },
+        provider as unknown as SourceControlProvider
+      )
+    ).resolves.toMatchObject({ baseBranch: branch });
+  });
+});

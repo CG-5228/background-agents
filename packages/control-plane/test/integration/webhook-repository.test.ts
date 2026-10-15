@@ -266,6 +266,66 @@ describe("Webhook repository resolution (real D1 and SessionDO)", () => {
     expect(await fetchRuns(ID)).toHaveLength(1);
   });
 
+  it.each([
+    { repoOwner: "acme", repoName: "api-v2" },
+    { repoOwner: "new-owner", repoName: "api" },
+  ])(
+    "rejects a renamed canonical target on a sessionKey follow-up: $repoOwner/$repoName",
+    async (renamed) => {
+      await seedAutomation();
+      const first = await deliver(payload, "first", "card");
+      checkRepositoryAccess.mockResolvedValueOnce({
+        ...renamed,
+        repoId: 101,
+        defaultBranch: "trunk",
+      });
+      await expect(deliver(payload, "follow-up", "card")).rejects.toMatchObject({ status: 409 });
+      const [run] = await fetchRuns(ID);
+      const stub = env.SESSION.get(env.SESSION.idFromName(run.session_id!));
+      expect(await queryDO(stub, "SELECT content FROM messages")).toHaveLength(1);
+      expect(await new SessionIndexStore(env.DB).get(run.session_id!)).toMatchObject({
+        repoOwner: "acme",
+        repoName: "api",
+      });
+      expect(await deliver(payload, "follow-up", "card")).toMatchObject({
+        steered: 1,
+        invocationIds: first.invocationIds,
+      });
+    }
+  );
+
+  it("returns HTTP 403 when repository permission is revoked between admission and launch", async () => {
+    await seedAutomation();
+    const claim = AutomationStore.prototype.claimRunSession;
+    vi.spyOn(AutomationStore.prototype, "claimRunSession").mockImplementation(async function (
+      this: AutomationStore,
+      ...args
+    ) {
+      const claimed = await claim.apply(this, args);
+      await assignCustomRole(OWNER, ["sessions.create"]);
+      return claimed;
+    });
+    await env.DB.prepare("UPDATE automations SET trigger_auth_data = ? WHERE id = ?")
+      .bind(await hashApiKey("test-webhook-key"), ID)
+      .run();
+    const handle = createTestRequestHandler([automationWebhookRoutes]);
+    const response = await handle(
+      new Request(`https://test.local/webhooks/automation/${ID}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer test-webhook-key" },
+        body: JSON.stringify({ ...payload, idempotencyKey: "revoked" }),
+      }),
+      createCloudflareEnv(env),
+      { submit() {} }
+    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ code: "WEBHOOK_REPOSITORY_RESOLUTION_FAILED" });
+    expect(await fetchRuns(ID)).toEqual([
+      expect.objectContaining({ status: "unauthorized", session_id: null }),
+    ]);
+    expect((await env.DB.prepare("SELECT id FROM sessions").all()).results).toEqual([]);
+  });
+
   it("keeps the resolved snapshot if stored targets change during lookup", async () => {
     await seedAutomation();
     getBranchHead.mockImplementationOnce(async () => {

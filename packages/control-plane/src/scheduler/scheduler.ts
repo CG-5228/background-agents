@@ -1520,7 +1520,11 @@ export class Scheduler {
           await releaseWebhookClaim();
         }
       }
-      if (webhookRepository && result.outcome === "unauthorized") {
+      if (
+        webhookRepository &&
+        (result.outcome === "unauthorized" ||
+          (result.outcome === "started" && allRunsUnauthorized(result.runs)))
+      ) {
         throw new WebhookRepositoryResolutionError(
           "Automation executor or team is not authorized for the resolved repository",
           403
@@ -2290,7 +2294,13 @@ export class Scheduler {
           : null;
       },
       buildPrompt: async (run, actor) => {
-        if (target && (run.repo_id !== target.repoId || run.base_branch !== target.baseBranch)) {
+        if (
+          target &&
+          (run.repo_id !== target.repoId ||
+            run.repo_owner !== target.repoOwner ||
+            run.repo_name !== target.repoName ||
+            run.base_branch !== target.baseBranch)
+        ) {
           throw new WebhookRepositoryResolutionError(
             "sessionKey belongs to a different repository or branch; use a new sessionKey",
             409

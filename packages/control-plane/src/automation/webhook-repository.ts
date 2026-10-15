@@ -6,7 +6,7 @@ import {
 } from "@open-inspect/shared/types/repositories";
 import { SourceControlProviderError, type SourceControlProvider } from "../source-control";
 
-/** A delivery error the webhook sender can act on; no run/session has been created. */
+/** A delivery error the webhook sender can act on; no new session was launched. */
 export class WebhookRepositoryResolutionError extends Error {
   constructor(
     message: string,
@@ -16,6 +16,24 @@ export class WebhookRepositoryResolutionError extends Error {
     super(message, options);
     this.name = "WebhookRepositoryResolutionError";
   }
+}
+
+/** Unicode mode matches unpaired UTF-16 surrogates while accepting valid pairs. */
+function isValidBranch(branch: string): boolean {
+  return (
+    Boolean(branch) &&
+    branch.length <= 255 &&
+    !branch.startsWith("-") &&
+    !/[\uD800-\uDFFF]/u.test(branch) &&
+    !/[~^:?*[\\]/.test(branch) &&
+    ![...branch].some(
+      (character) => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127
+    ) &&
+    !branch.includes("..") &&
+    !branch.includes("@{") &&
+    !branch.endsWith(".") &&
+    !branch.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock"))
+  );
 }
 
 /** Resolve one target, checking installation access and a real branch before admission. */
@@ -62,6 +80,10 @@ export async function resolveWebhookRepository(
       "Payload branch must be a non-empty string when provided"
     );
   }
+  const branchOverride = typeof rawBranch === "string" ? rawBranch.trim() : config.fallbackBranch;
+  if (branchOverride !== undefined && !isValidBranch(branchOverride)) {
+    throw new WebhookRepositoryResolutionError("Resolved branch is invalid");
+  }
   try {
     const access = await provider.checkRepositoryAccess({
       owner: pair.repoOwner,
@@ -73,24 +95,9 @@ export async function resolveWebhookRepository(
         403
       );
     }
-    const branch =
-      typeof rawBranch === "string"
-        ? rawBranch.trim()
-        : (config.fallbackBranch ?? access.defaultBranch);
+    const branch = branchOverride ?? access.defaultBranch;
     // getBranchHead accepts a branch, rather than tags or arbitrary commit-ish values.
-    if (
-      !branch ||
-      branch.length > 255 ||
-      branch.startsWith("-") ||
-      /[~^:?*[\\]/.test(branch) ||
-      [...branch].some(
-        (character) => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127
-      ) ||
-      branch.includes("..") ||
-      branch.includes("@{") ||
-      branch.endsWith(".") ||
-      branch.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock"))
-    ) {
+    if (!isValidBranch(branch)) {
       throw new WebhookRepositoryResolutionError("Resolved branch is invalid");
     }
     const head = await provider.getBranchHead(

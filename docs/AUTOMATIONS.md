@@ -181,7 +181,9 @@ the resolved repository's default branch. A supplied empty or non-string branch 
 chosen branch must exist in the resolved repository; tags and commit SHAs are not branch selectors.
 Resolution failures return `WEBHOOK_REPOSITORY_RESOLUTION_FAILED`: HTTP 400 for missing/invalid
 fields or branches, 403 for inaccessible or disallowed repositories, and 503 for unavailable SCM
-lookups. Rejected resolutions create no invocation, run, or session.
+lookups. Rejected repository/branch resolutions create no invocation, run, or session. If execution
+authorization is revoked after admission, the webhook returns 403 and retains an unauthorized run
+without creating a session.
 
 Each delivery selects one repository. The run history and session snapshot record its resolved
 repository and branch, and the agent context includes both alongside the original payload (subject
