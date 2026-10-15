@@ -180,6 +180,11 @@ describe("automation read, update, and delete routes", () => {
           expect.objectContaining({ max_retries: maxRetries })
         );
       }
+      expect(mockStore.bindWithdrawRetries).toHaveBeenCalledTimes(1);
+      expect(mockBatch).toHaveBeenLastCalledWith([
+        { sql: "update-automation" },
+        { sql: "withdraw-retries" },
+      ]);
     });
 
     it("refuses target edits the current executor could not launch", async () => {

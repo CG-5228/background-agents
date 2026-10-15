@@ -120,6 +120,11 @@ describe("automation lifecycle routes", () => {
       const res = await callRoute("POST", "/automations/auto-1/pause");
       expect(res.status).toBe(200);
       expect(mockStore.bindPause).toHaveBeenCalledWith("auto-1");
+      expect(mockStore.bindWithdrawRetries).toHaveBeenCalledWith("auto-1");
+      expect(mockBatch).toHaveBeenCalledWith([
+        { sql: "pause-automation" },
+        { sql: "withdraw-retries" },
+      ]);
     });
 
     it("returns 404 when not found", async () => {

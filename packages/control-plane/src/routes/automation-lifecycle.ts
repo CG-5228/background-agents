@@ -41,7 +41,7 @@ async function handlePauseAutomation(
   const id = params.id;
 
   const store = new AutomationStore(ctx.db);
-  const result = await ctx.db.batch([store.bindPause(id)]);
+  const result = await ctx.db.batch([store.bindPause(id), store.bindWithdrawRetries(id)]);
   const paused = result[0]?.meta.changes === 1;
   if (!paused) return error("Automation not found", 404);
 

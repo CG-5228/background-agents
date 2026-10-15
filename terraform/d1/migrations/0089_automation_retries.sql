@@ -18,3 +18,6 @@ DROP INDEX idx_runs_active_lookup;
 CREATE INDEX idx_runs_active_lookup ON automation_runs (automation_id, created_at DESC)
   WHERE status IN ('starting', 'running', 'retrying');
 ALTER TABLE automation_runs ADD COLUMN retry_run_id TEXT;
+
+ALTER TABLE automation_runs ADD COLUMN retry_withdrawn_at INTEGER;
+ALTER TABLE automation_runs ADD COLUMN completion_publication_claimed_at INTEGER;

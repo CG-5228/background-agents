@@ -736,7 +736,11 @@ export class AutomationStore {
 
   async update(id: string, fields: Partial<AutomationRow>): Promise<AutomationRow | null> {
     const statement = this.bindAutomationUpdate(id, fields);
-    if (statement) await statement.run();
+    if (statement) {
+      if (fields.max_retries === 0 || fields.enabled === 0)
+        await this.db.batch([statement, this.bindWithdrawRetries(id)]);
+      else await statement.run();
+    }
     return this.getById(id);
   }
 
@@ -785,6 +789,17 @@ export class AutomationStore {
       );
   }
 
+  /** Withdraw pending attempts in the same transaction as a pause, delete, or retry disable. */
+  bindWithdrawRetries(id: string, now = Date.now()): SqlStatement {
+    return this.db
+      .prepare(
+        `UPDATE automation_runs
+      SET status = 'failed', retry_at = NULL, retryable = 0, retry_withdrawn_at = ?
+      WHERE automation_id = ? AND status = 'retrying'`
+      )
+      .bind(now, id);
+  }
+
   /** Build a soft-delete statement for composition in an atomic batch. */
   bindSoftDelete(id: string, now = Date.now()): SqlStatement {
     return this.db
@@ -796,7 +811,7 @@ export class AutomationStore {
 
   /** Soft-delete an automation and report whether a live row changed. */
   async softDelete(id: string): Promise<boolean> {
-    const result = await this.bindSoftDelete(id).run();
+    const [result] = await this.db.batch([this.bindSoftDelete(id), this.bindWithdrawRetries(id)]);
     return (result.meta?.changes ?? 0) > 0;
   }
 
@@ -811,7 +826,7 @@ export class AutomationStore {
 
   /** Pause an automation and report whether a live row changed. */
   async pause(id: string): Promise<boolean> {
-    const result = await this.bindPause(id).run();
+    const [result] = await this.db.batch([this.bindPause(id), this.bindWithdrawRetries(id)]);
     return (result.meta?.changes ?? 0) > 0;
   }
 
@@ -1451,6 +1466,19 @@ export class AutomationStore {
       .run();
   }
 
+  /** One publisher across the retry launcher and a racing session completion callback. */
+  async claimRetryCompletionPublication(runId: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE automation_runs SET completion_publication_claimed_at = ?
+      WHERE id = ? AND attempt > 1 AND status IN ('completed', 'failed', 'unauthorized')
+        AND superseded_at IS NULL AND completion_publication_claimed_at IS NULL`
+      )
+      .bind(Date.now(), runId)
+      .run();
+    return (result.meta.changes ?? 0) > 0;
+  }
+
   async getInvocationById(invocationId: string): Promise<AutomationInvocationRow | null> {
     return this.db
       .prepare(`SELECT * FROM automation_invocations WHERE id = ?`)
@@ -1735,7 +1763,7 @@ export class AutomationStore {
              WHERE r.invocation_id = i.id AND r.status = 'failed' AND r.superseded_at IS NULL)
            AND NOT EXISTS (
              SELECT 1 FROM automation_runs r
-             WHERE r.invocation_id = i.id AND r.status IN ('starting', 'running'))
+             WHERE r.invocation_id = i.id AND r.status IN ('starting', 'running', 'retrying'))
          ORDER BY i.created_at ASC
          LIMIT ?`
       )
@@ -1844,10 +1872,10 @@ export class AutomationStore {
          LEFT JOIN sessions s ON r.session_id = s.id
          WHERE r.automation_id = ?
            AND i.concurrency_key = ?
-           AND r.superseded_at IS NULL AND r.status <> 'retrying'
+           AND r.superseded_at IS NULL
            AND (
              s.id IS NOT NULL
-             OR r.status = 'starting'
+             OR r.status IN ('starting', 'retrying')
              OR (r.status = 'running' AND r.first_prompt_pending = 1)
            )
          ORDER BY r.created_at DESC LIMIT 1`
@@ -1893,7 +1921,8 @@ export class AutomationStore {
          WHERE EXISTS (
            SELECT 1 FROM automation_runs
            WHERE id = ?
-             AND (status = 'starting' OR (status = 'running' AND first_prompt_pending = 1))
+             AND superseded_at IS NULL
+             AND (status IN ('starting', 'retrying') OR (status = 'running' AND first_prompt_pending = 1))
          ) OR EXISTS (SELECT 1 FROM automation_run_held_prompts WHERE run_id = ?)
          ON CONFLICT (run_id, client_request_id) DO NOTHING`
       )
@@ -2039,13 +2068,7 @@ export class AutomationStore {
   }
 
   async autoPause(automationId: string): Promise<void> {
-    const now = Date.now();
-    await this.db
-      .prepare(
-        "UPDATE automations SET enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
-      )
-      .bind(now, automationId)
-      .run();
+    await this.pause(automationId);
   }
 }
 

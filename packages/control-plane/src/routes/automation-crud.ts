@@ -824,6 +824,7 @@ async function handleUpdateAutomation(
   const statements: SqlStatement[] = [];
   const updateStatement = store.bindAutomationUpdate(id, updateFields);
   if (updateStatement) statements.push(updateStatement);
+  if (body.maxRetries === 0) statements.push(store.bindWithdrawRetries(id));
   if (replacementRepositories !== null) {
     statements.push(...store.bindReplaceRepositories(id, replacementRepositories, Date.now()));
   }
@@ -866,7 +867,7 @@ async function handleDeleteAutomation(
   const id = params.id;
 
   const store = new AutomationStore(ctx.db);
-  const result = await ctx.db.batch([store.bindSoftDelete(id)]);
+  const result = await ctx.db.batch([store.bindSoftDelete(id), store.bindWithdrawRetries(id)]);
   const deleted = result[0]?.meta.changes === 1;
   if (!deleted) return error("Automation not found", 404);
 

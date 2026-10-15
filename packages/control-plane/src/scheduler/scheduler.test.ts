@@ -185,6 +185,7 @@ function createMockStore() {
     }),
     insertSkippedInvocation: vi.fn().mockResolvedValue({ inserted: true }),
     recordAuthorizationDenied: vi.fn().mockResolvedValue({ inserted: true, paused: true }),
+    claimRetryCompletionPublication: vi.fn().mockResolvedValue(true),
     setRetryContext: vi.fn().mockResolvedValue(undefined),
     getInvocationById: vi.fn().mockResolvedValue(null),
     getInvocationIdByTriggerKey: vi.fn().mockResolvedValue(null),
@@ -2940,6 +2941,18 @@ describe("Scheduler", () => {
         expect(threadIndex).toBeLessThan(userIndex);
         expect(content).toContain("please deploy the api");
         expect(content).toContain(sampleSlackPermalink);
+      });
+
+      it("launches admitted children with the persisted fallback when saving expanded context fails", async () => {
+        mockGetSlackAutomationsForChannel.mockResolvedValue([sampleSlackAutomation]);
+        mockStore.getLatestContinuableRun.mockResolvedValue(null);
+        mockStore.setRetryContext.mockRejectedValueOnce(new Error("D1 unavailable"));
+        const { env, stub } = threadContextEnv();
+        expect(await createScheduler(env).event(makeSlackEvent())).toMatchObject({ triggered: 1 });
+        const saved = mockStore.insertInvocationGuarded.mock.calls[0][0].invocation;
+        const content = (await getPromptBody(vi.mocked(stub.fetch))).content;
+        expect(content).toBe(JSON.parse(saved.retry_context).instructions);
+        expect(mockStore.claimRunSession).toHaveBeenCalledTimes(1);
       });
 
       it("reuses one context result across several matching automations", async () => {

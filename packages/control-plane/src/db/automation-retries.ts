@@ -21,6 +21,7 @@ export async function scheduleInvocationRetries(
       `UPDATE automation_runs SET status = 'retrying',
        retry_at = completed_at + ? * (1 << (attempt - 1))
      WHERE invocation_id = ? AND status = 'failed' AND superseded_at IS NULL
+       AND retry_withdrawn_at IS NULL
        AND (retryable = 1 OR session_id IS NULL)
        AND completed_at IS NOT NULL
        AND COALESCE(failure_reason, '') NOT LIKE '%cancel%'
@@ -41,12 +42,13 @@ export async function getDueRetries(
 ): Promise<AutomationRunRow[]> {
   await db
     .prepare(
-      `UPDATE automation_runs SET status = 'failed', retry_at = NULL, retryable = 0
+      `UPDATE automation_runs SET status = 'failed', retry_at = NULL, retryable = 0, retry_withdrawn_at = ?
      WHERE status = 'retrying' AND (
        NOT EXISTS (SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id
          AND a.enabled = 1 AND a.deleted_at IS NULL AND automation_runs.attempt <= a.max_retries)
        OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = automation_runs.session_id AND s.status = 'cancelled'))`
     )
+    .bind(now)
     .run();
   const result = await db
     .prepare(
@@ -74,6 +76,7 @@ export async function claimRetry(
         `UPDATE automation_runs SET status = 'failed', retry_at = NULL,
          superseded_at = ?, retry_run_id = ?
        WHERE id = ? AND status = 'retrying' AND retry_at <= ? AND superseded_at IS NULL
+         AND retry_withdrawn_at IS NULL
          AND EXISTS (SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id
            AND a.enabled = 1 AND a.deleted_at IS NULL AND automation_runs.attempt <= a.max_retries)
          AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = automation_runs.session_id AND s.status = 'cancelled')`
@@ -89,6 +92,12 @@ export async function claimRetry(
        FROM automation_runs WHERE id = ? AND retry_run_id = ?`
       )
       .bind(newRunId, now, previousRunId, newRunId),
+    db
+      .prepare(
+        `UPDATE automation_run_held_prompts SET run_id = ?
+      WHERE run_id = ? AND EXISTS (SELECT 1 FROM automation_runs WHERE id = ?)`
+      )
+      .bind(newRunId, previousRunId, newRunId),
   ]);
   if (!results[0]?.meta.changes) return null;
   return db

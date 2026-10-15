@@ -757,16 +757,25 @@ export class Scheduler {
       }
     }
 
-    // Retain the event-specific prompt and original execution authority across worker restarts.
+    // Launch and retries must use the same persisted context, even if the richer snapshot fails.
     if (params.instructionsOverrideFactory) {
-      await store.setRetryContext(
-        invocationId,
-        JSON.stringify({
-          instructions: instructionsOverride ?? automation.instructions,
-          platformUserId: executionPrincipal.platformUserId,
-          participantUserId: executionPrincipal.participantUserId,
-        })
-      );
+      try {
+        await store.setRetryContext(
+          invocationId,
+          JSON.stringify({
+            instructions: instructionsOverride ?? automation.instructions,
+            platformUserId: executionPrincipal.platformUserId,
+            participantUserId: executionPrincipal.participantUserId,
+          })
+        );
+      } catch (error) {
+        instructionsOverride = params.instructionsOverride;
+        this.log.warn("Failed to save expanded retry context; using admitted fallback", {
+          event: "scheduler.retry_context_failed",
+          invocation_id: invocationId,
+          error,
+        });
+      }
     }
 
     let nextLaunchIndex = 0;
@@ -959,6 +968,15 @@ export class Scheduler {
           Object.fromEntries(providerAuth.map((auth) => [auth.provider, auth.authMode]))
         );
         const target = await this.resolveLaunchTargets(automation, [child]);
+        if (
+          automation.owner_team_id !== null &&
+          !(await new TeamRepositoryGrantStore(this.db).covers(
+            automation.owner_team_id,
+            launchTargetRepoIds(target)
+          ))
+        ) {
+          throw new AutomationExecutionUnauthorizedError("target_team_missing_grant");
+        }
         await this.launchChild(store, automation, child, {
           executionPrincipal: principal,
           authorization,
@@ -968,13 +986,42 @@ export class Scheduler {
         });
       } catch (error) {
         await store.updateRun(child.id, {
-          status: "failed",
+          status: error instanceof AutomationExecutionUnauthorizedError ? "unauthorized" : "failed",
           completed_at: Date.now(),
-          failure_reason: error instanceof Error ? error.message : String(error),
+          failure_reason:
+            error instanceof AutomationExecutionUnauthorizedError
+              ? error.reason
+              : error instanceof Error
+                ? error.message
+                : String(error),
           retryable: 1,
         });
       }
       await this.applyInvocationAccounting(store, automation.id, child.invocation_id);
+      const settled = await store.getRunById(automation.id, child.id);
+      if (
+        settled &&
+        (settled.status === "failed" || settled.status === "unauthorized") &&
+        (await store.claimRetryCompletionPublication(child.id))
+      ) {
+        // Use an existing attempt's session for publication scope when this retry never opened one.
+        const history = await store.getInvocation(automation.id, child.invocation_id);
+        let sessionId = child.id;
+        for (const attempt of history?.runs.slice().reverse() ?? []) {
+          if (attempt.sessionId && (await new SessionIndexStore(this.db).get(attempt.sessionId))) {
+            sessionId = attempt.sessionId;
+            break;
+          }
+        }
+        await this.notifySlackCompletion(store, settled, {
+          automationId: automation.id,
+          runId: child.id,
+          sessionId,
+          messageId: `automation-retry-failure:${child.id}`,
+          success: false,
+          error: settled.failure_reason ?? "Automation retry failed",
+        });
+      }
       launched++;
     }
     return launched;
@@ -1822,7 +1869,9 @@ export class Scheduler {
     // this fan-out (not the session callback path) because the message
     // coordinates live on the invocation. Only the terminal CAS winner owns
     // publication retries; retrying runComplete itself would be ignored.
-    await this.notifySlackCompletion(store, run, body);
+    if ((run.attempt ?? 1) <= 1 || (await store.claimRetryCompletionPublication(run.id))) {
+      await this.notifySlackCompletion(store, run, body);
+    }
   }
 
   /**
