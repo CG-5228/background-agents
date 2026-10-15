@@ -1,4 +1,4 @@
-import type { SqlDatabase } from "./sql-database";
+import type { SqlBoundList, SqlDatabase } from "./sql-database";
 
 /** D1's maximum string size, including a serialized bound JSON parameter. */
 export const MAX_SQLITE_JSON_BYTES = 2_000_000;
@@ -45,10 +45,24 @@ export function sqliteSetOperations(db: SqlDatabase): Pick<SqlDatabase, "bulkIns
       );
     },
     idList(ids) {
-      return jsonBatches(ids).map((json) => ({
-        sql: "SELECT value FROM json_each(?)",
-        values: [json],
-      }));
+      const encoder = new TextEncoder();
+      const expandable: string[] = [];
+      const direct: SqlBoundList[] = [];
+      for (const id of ids) {
+        // Escaping can exceed the JSON limit even when the raw ID fits a binding.
+        if (encoder.encode(JSON.stringify(id)).byteLength + 2 > MAX_SQLITE_JSON_BYTES) {
+          direct.push({ sql: "?", values: [id] });
+        } else {
+          expandable.push(id);
+        }
+      }
+      return [
+        ...jsonBatches(expandable).map((json) => ({
+          sql: "SELECT value FROM json_each(?)",
+          values: [json],
+        })),
+        ...direct,
+      ];
     },
   };
 }

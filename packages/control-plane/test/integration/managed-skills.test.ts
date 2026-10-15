@@ -490,6 +490,28 @@ describe("managed skills persistence and resolution", () => {
     expect((await profiles.getOwned(profile.id, "user_1"))?.skillIds).toEqual([]);
   });
 
+  it.each(["POST", "PATCH"])(
+    "returns 400 for an oversized escaped profile skill ID on %s",
+    async (method) => {
+      const originalResponse = await serviceFetch("https://test.local/skill-profiles", {
+        method: "POST",
+        body: JSON.stringify({ name: "Original", skillIds: [] }),
+      });
+      expect(originalResponse.status).toBe(201);
+      const { profile } = await originalResponse.json<{ profile: { id: string } }>();
+      const response = await serviceFetch(
+        `https://test.local/skill-profiles${method === "PATCH" ? `/${profile.id}` : ""}`,
+        { method, body: JSON.stringify({ name: "Changed", skillIds: ["\\".repeat(999_999)] }) }
+      );
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({ error: "One or more skills do not exist" });
+      const profiles = await serviceFetch("https://test.local/skill-profiles");
+      await expect(profiles.json()).resolves.toMatchObject({
+        profiles: [{ name: "Original", skillIds: [] }],
+      });
+    }
+  );
+
   it("pages the sandbox installation without changing the unpaged contract", async () => {
     await seedGlobalCatalog(101);
     const manifest = await resolveManagedSkills(

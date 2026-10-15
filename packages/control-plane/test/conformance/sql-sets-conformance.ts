@@ -67,6 +67,32 @@ export function registerSqlSetsConformanceSuite(factory: SqlDatabaseFactory) {
       });
     });
 
+    it("directly binds an identifier whose JSON escaping exceeds the byte limit", async () => {
+      await withTable(async (db) => {
+        const escapedId = "\\".repeat(999_999);
+        expect(new TextEncoder().encode(escapedId).byteLength).toBeLessThan(MAX_SQLITE_JSON_BYTES);
+        expect(new TextEncoder().encode(JSON.stringify([escapedId])).byteLength).toBeGreaterThan(
+          MAX_SQLITE_JSON_BYTES
+        );
+        await db.batch([
+          db.prepare("INSERT INTO set_rows VALUES (?, ?, ?)").bind(1, "ordinary", 1),
+          db.prepare("INSERT INTO set_rows VALUES (?, ?, ?)").bind(2, escapedId, 2),
+        ]);
+        const lists = idListBatches(db, ["ordinary", escapedId, "missing"]);
+        expect(lists).toHaveLength(2);
+        expect(lists.find(({ sql }) => sql === "?")?.values).toEqual([escapedId]);
+        const ids: number[] = [];
+        for (const list of lists) {
+          const result = await db
+            .prepare(`SELECT id FROM set_rows WHERE label IN (${list.sql})`)
+            .bind(...list.values)
+            .all<{ id: number }>();
+          ids.push(...result.results.map(({ id }) => id));
+        }
+        expect(ids.sort()).toEqual([1, 2]);
+      });
+    });
+
     it("splits multi-byte JSON by bytes while preserving rows across chunks", async () => {
       await withTable(async (db) => {
         // JS length fits one chunk, UTF-8 bytes require two.
