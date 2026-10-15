@@ -1,6 +1,16 @@
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
 import type { SqlDatabase } from "./sql-database";
 
+/**
+ * Runtime-owned launch settings the index mirrors for lists, analytics and
+ * export. They ride on every status projection, so a projection that failed
+ * is repaired by the next one rather than needing its own retry.
+ */
+export interface ProjectedSessionSettings {
+  model: string;
+  reasoningEffort: string | null;
+}
+
 /** Owns lifecycle projection writes; activity timestamps never fence status. */
 export class SessionStatusProjectionStore {
   constructor(private readonly db: SqlDatabase) {}
@@ -10,14 +20,26 @@ export class SessionStatusProjectionStore {
     id: string,
     status: SessionStatus,
     revision: number,
-    updatedAt: number
+    updatedAt: number,
+    settings: ProjectedSessionSettings
   ): Promise<boolean> {
     const result = await this.db
       .prepare(
-        `UPDATE sessions SET status = ?, status_revision = ?, updated_at = MAX(updated_at, ?)
+        `UPDATE sessions SET status = ?, status_revision = ?, updated_at = MAX(updated_at, ?),
+         model = ?, reasoning_effort = ?
        WHERE id = ? AND (status_revision < ? OR (status_revision = ? AND status = ?))`
       )
-      .bind(status, revision, updatedAt, id, revision, revision, status)
+      .bind(
+        status,
+        revision,
+        updatedAt,
+        settings.model,
+        settings.reasoningEffort,
+        id,
+        revision,
+        revision,
+        status
+      )
       .run();
     return (result.meta?.changes ?? 0) > 0;
   }

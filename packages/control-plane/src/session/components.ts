@@ -788,7 +788,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     durableObjectId,
     async () => {
       await statusService.cancel(() => messageQueue.cancelExecution());
-    }
+    },
+    sessionIndexStore
   );
   const sessionBudgetHandler = new SessionBudgetHandler(sessionCoreRepository, budgetService, () =>
     Date.now()

@@ -9,6 +9,7 @@ import type { SandboxStateReader } from "../../sandbox-ports";
 import type { MessageRepository } from "../../message-repository";
 import type { SessionStatusService } from "../../session-status-service";
 import type { SessionTitleService } from "../../title-service";
+import type { SessionIndexStore } from "../../../db/session-index";
 import { resolvePublicSessionId } from "../../public-session-id";
 import { normalizeSessionTitle, type SessionTitleUpdateResult } from "../../title";
 import { z } from "zod";
@@ -68,7 +69,8 @@ export class SessionLifecycleHandler {
     private readonly titleService: SessionTitleService,
     private readonly sandboxLifecycle: SandboxCancellation,
     private readonly durableObjectId: string,
-    private readonly cancelSession: () => Promise<void>
+    private readonly cancelSession: () => Promise<void>,
+    private readonly sessionIndex: Pick<SessionIndexStore, "deleteExpiredDraft">
   ) {}
 
   getState(): Response {
@@ -180,29 +182,28 @@ export class SessionLifecycleHandler {
   }
 
   /**
-   * Retire a warm session that never received a prompt.
+   * Discard a warm session that never received a prompt.
    *
    * The web client warms a session on the first keystroke, so navigating away
    * without submitting leaves a `created` row whose sandbox idles out — and no
    * other transition reaches it, because `active` needs an enqueued prompt and
    * the terminal statuses need a finished execution. The composer discards its
    * draft through here as soon as it is abandoned, and the sweep catches the
-   * rest.
+   * rest. Both only report the outcome; the whole discard happens here.
    *
-   * The draft's sandbox is destroyed rather than preserved: it never ran any
-   * work, and a composer discard arrives seconds after the warm spawn, when the
-   * sandbox would otherwise idle until its inactivity timeout.
-   *
-   * An `archived` answer is final: the caller deletes the session's index row
-   * next, so the draft is marked discarded in the same turn and `unarchive`
-   * refuses it. Otherwise an unarchive landing between this answer and the
-   * delete would leave a restored session with no index row.
+   * The decision is made, and made irreversible, before any I/O: the draft is
+   * marked discarded and committed `archived` locally in one synchronous turn,
+   * so no prompt is admitted and `unarchive` refuses it from then on. The index
+   * keeps reading `created` until its row is deleted, and the cleanup that
+   * follows (destroy the sandbox, delete the row) is idempotent: a call that
+   * fails part-way throws, and any later call for a discarded draft — a retry,
+   * or the sweep, which still selects the `created` row — finishes it.
    *
    * The sweep selects candidates from the D1 index, which it may have read
    * before a prompt arrived. Re-checking here is what makes that safe: the
    * Durable Object is the authority on the session's own state and runs
    * single-threaded, so a session that started work in the meantime is left
-   * alone rather than archived out from under its author.
+   * alone rather than discarded out from under its author.
    */
   async expireDraft(): Promise<Response> {
     const session = this.sessionCoreRepository.getSession();
@@ -210,38 +211,53 @@ export class SessionLifecycleHandler {
       return Response.json({ error: "Session not found" }, { status: 404 });
     }
 
-    if (session.status !== "created") {
-      // Reaching here means the index still reads `created` while this session
-      // has moved on — which is exactly what happens when an earlier
-      // transition's D1 projection failed (they are logged and swallowed).
-      // Repairing the mirror is what stops the row being selected instead of
-      // being retried every sweep forever.
-      await this.statusService.repairIndexStatus();
-      return Response.json({ outcome: "not_draft", status: session.status });
+    if (!this.sessionCoreRepository.isSessionDiscarded(session.id)) {
+      if (session.status !== "created") {
+        // Reaching here means the index still reads `created` while this session
+        // has moved on — which is exactly what happens when an earlier
+        // transition's D1 projection failed (they are logged and swallowed).
+        // Repairing the mirror is what stops the row being selected instead of
+        // being retried every sweep forever.
+        await this.statusService.repairIndexStatus();
+        return Response.json({ outcome: "not_draft", status: session.status });
+      }
+
+      if (
+        this.messageRepository.getPendingOrProcessingCount() > 0 ||
+        this.messageRepository.getMessageCount() > 0
+      ) {
+        // A session holding messages while still `created` is a broken aggregate:
+        // enqueueing a prompt inserts the message and transitions to `active` in
+        // the same Durable Object turn, so current code cannot produce this. It
+        // survives only on rows predating that guarantee, and answering without
+        // changing anything is what let them pin the head of the sweep's
+        // oldest-first batch forever. Settle the status to what the messages say
+        // instead. A queued prompt is left for the dispatch timeout rather than
+        // archived: archiving discards a real request, and `archived` is not
+        // promptable, so the author could not resume it either.
+        const settled = await this.statusService.settleFromMessageState();
+        return Response.json({ outcome: "has_work", status: settled });
+      }
+
+      // Not projected: the index row is deleted below, and until then it must
+      // keep reading `created` so the sweep can finish a discard that failed.
+      const now = Date.now();
+      this.sessionCoreRepository.markSessionDiscarded(session.id, now);
+      this.sessionCoreRepository.updateSessionStatus(
+        session.id,
+        "archived",
+        Math.max(now, session.updated_at + 1)
+      );
     }
 
-    if (
-      this.messageRepository.getPendingOrProcessingCount() > 0 ||
-      this.messageRepository.getMessageCount() > 0
-    ) {
-      // A session holding messages while still `created` is a broken aggregate:
-      // enqueueing a prompt inserts the message and transitions to `active` in
-      // the same Durable Object turn, so current code cannot produce this. It
-      // survives only on rows predating that guarantee, and answering without
-      // changing anything is what let them pin the head of the sweep's
-      // oldest-first batch forever. Settle the status to what the messages say
-      // instead. A queued prompt is left for the dispatch timeout rather than
-      // archived: archiving discards a real request, and `archived` is not
-      // promptable, so the author could not resume it either.
-      const settled = await this.statusService.settleFromMessageState();
-      return Response.json({ outcome: "has_work", status: settled });
-    }
-
-    this.sessionCoreRepository.markSessionDiscarded(session.id, Date.now());
-    await this.statusService.transition("archived");
+    // A draft never ran any work, so its sandbox is destroyed rather than
+    // preserved; a composer discard arrives seconds after the warm spawn.
     await this.sandboxLifecycle.cancelSandbox();
+    await this.sessionIndex.deleteExpiredDraft(
+      resolvePublicSessionId(session, this.durableObjectId)
+    );
 
-    return Response.json({ outcome: "archived", status: "archived" });
+    return Response.json({ outcome: "discarded", status: "archived" });
   }
 
   /** Restore the session after route-level lifecycle authorization has succeeded. */

@@ -833,14 +833,6 @@ export class SessionIndexStore {
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  async updateModel(id: string, model: string, reasoningEffort: string | null): Promise<boolean> {
-    const result = await this.db
-      .prepare("UPDATE sessions SET model = ?, reasoning_effort = ? WHERE id = ?")
-      .bind(model, reasoningEffort, id)
-      .run();
-    return (result.meta?.changes ?? 0) > 0;
-  }
-
   async touchUpdatedAt(id: string): Promise<boolean> {
     const result = await this.db
       .prepare("UPDATE sessions SET updated_at = ? WHERE id = ?")

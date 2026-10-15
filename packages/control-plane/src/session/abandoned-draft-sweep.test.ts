@@ -32,14 +32,13 @@ function createIndex(ids: string[] | Error, archiveError?: Error): AbandonedDraf
       if (archiveError) throw archiveError;
       return true;
     }),
-    deleteExpiredDraft: vi.fn(async () => true),
   };
 }
 
 function createClient(outcomes: Record<string, DraftSweepOutcome | Error> = {}): DraftExpiryClient {
   return {
     expireDraft: vi.fn(async (sessionId: string) => {
-      const outcome = outcomes[sessionId] ?? "archived";
+      const outcome = outcomes[sessionId] ?? "discarded";
       if (outcome instanceof Error) throw outcome;
       return outcome;
     }),
@@ -56,7 +55,7 @@ describe("AbandonedDraftSweep", () => {
     expect(index.listAbandonedDraftSessionIds).toHaveBeenCalledWith(NOW - TTL_MS, 50);
   });
 
-  it("expires every candidate the session confirms and deletes its index row", async () => {
+  it("discards every candidate the session confirms", async () => {
     const index = createIndex(["a", "b"]);
     const sweep = new AbandonedDraftSweep(index, createClient(), createLog(), TTL_MS, 50);
 
@@ -64,19 +63,17 @@ describe("AbandonedDraftSweep", () => {
 
     expect(result).toEqual({
       candidates: 2,
-      archived: 2,
+      discarded: 2,
       notDraft: 0,
       hasWork: 0,
       missing: 0,
       errored: 0,
       truncated: false,
     });
-    expect(index.deleteExpiredDraft).toHaveBeenCalledWith("a");
-    expect(index.deleteExpiredDraft).toHaveBeenCalledWith("b");
   });
 
   it("separates the two reasons a session declines to expire", async () => {
-    const index = createIndex(["archived-one", "started-work", "queued-work"]);
+    const index = createIndex(["discarded-one", "started-work", "queued-work"]);
     const sweep = new AbandonedDraftSweep(
       index,
       createClient({ "started-work": "not_draft", "queued-work": "has_work" }),
@@ -91,14 +88,11 @@ describe("AbandonedDraftSweep", () => {
     // been repaired, `has_work` means a prompt that never dispatched.
     expect(result).toMatchObject({
       candidates: 3,
-      archived: 1,
+      discarded: 1,
       notDraft: 1,
       hasWork: 1,
       errored: 0,
     });
-    // Only a session the runtime confirmed empty loses its index row.
-    expect(index.deleteExpiredDraft).toHaveBeenCalledTimes(1);
-    expect(index.deleteExpiredDraft).toHaveBeenCalledWith("archived-one");
   });
 
   it("isolates a failing session from the rest of the batch", async () => {
@@ -113,7 +107,7 @@ describe("AbandonedDraftSweep", () => {
 
     const result = await sweep.run(NOW);
 
-    expect(result).toMatchObject({ candidates: 2, archived: 1, errored: 1 });
+    expect(result).toMatchObject({ candidates: 2, discarded: 1, errored: 1 });
     expect(log.warn).toHaveBeenCalledWith(
       "Abandoned draft expiry failed",
       expect.objectContaining({ session_id: "broken" })
@@ -149,7 +143,7 @@ describe("AbandonedDraftSweep", () => {
 
     expect(result).toEqual({
       candidates: 0,
-      archived: 0,
+      discarded: 0,
       notDraft: 0,
       hasWork: 0,
       missing: 0,
@@ -178,8 +172,7 @@ describe("AbandonedDraftSweep", () => {
     // A 404 proves there is no durable object state to diverge from, so the
     // index row can be retired directly.
     expect(index.archiveOrphanedDraft).toHaveBeenCalledWith("orphan");
-    expect(index.deleteExpiredDraft).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ candidates: 1, missing: 1, archived: 0, errored: 0 });
+    expect(result).toMatchObject({ candidates: 1, missing: 1, discarded: 0, errored: 0 });
   });
 
   it("counts a failed orphan archive as errored without dropping the batch", async () => {
@@ -194,7 +187,7 @@ describe("AbandonedDraftSweep", () => {
 
     const result = await sweep.run(NOW);
 
-    expect(result).toMatchObject({ candidates: 2, archived: 1, missing: 0, errored: 1 });
+    expect(result).toMatchObject({ candidates: 2, discarded: 1, missing: 0, errored: 1 });
   });
 
   it("raises an alarm when a full batch makes no progress at all", async () => {
@@ -219,7 +212,7 @@ describe("AbandonedDraftSweep", () => {
     );
   });
 
-  it("stays quiet when a full batch was repaired rather than archived", async () => {
+  it("stays quiet when a full batch was repaired rather than discarded", async () => {
     // `not_draft` and `has_work` archive nothing, but both now leave `created`
     // behind, so the next run reads different rows. That is progress, not a wall.
     const log = createLog();
@@ -233,7 +226,7 @@ describe("AbandonedDraftSweep", () => {
 
     const result = await sweep.run(NOW);
 
-    expect(result).toMatchObject({ truncated: true, archived: 0, notDraft: 1, hasWork: 1 });
+    expect(result).toMatchObject({ truncated: true, discarded: 0, notDraft: 1, hasWork: 1 });
     expect(log.error).not.toHaveBeenCalled();
   });
 
@@ -269,7 +262,7 @@ describe("SessionDraftExpiryClient", () => {
 
   it("bounds each request so one stalled session cannot hold up the sweep", async () => {
     const client = new SessionDraftExpiryClient(
-      createSessions(Response.json({ outcome: "archived" }))
+      createSessions(Response.json({ outcome: "discarded" }))
     );
 
     await client.expireDraft("session-1");

@@ -47,7 +47,7 @@ const ABANDONED_DRAFT_EXPIRY_TIMEOUT_MS = 10_000;
  * protocol drift surfaces as an error rather than being miscounted as routine
  * maintenance.
  */
-const draftExpiryOutcomeSchema = z.enum(["archived", "not_draft", "has_work"]);
+const draftExpiryOutcomeSchema = z.enum(["discarded", "not_draft", "has_work"]);
 type DraftExpiryOutcome = z.infer<typeof draftExpiryOutcomeSchema>;
 
 /**
@@ -63,7 +63,6 @@ const draftExpiryResponseSchema = z.object({ outcome: draftExpiryOutcomeSchema }
 export interface AbandonedDraftIndex {
   listAbandonedDraftSessionIds(staleBefore: number, limit: number): Promise<string[]>;
   archiveOrphanedDraft(id: string): Promise<boolean>;
-  deleteExpiredDraft(id: string): Promise<boolean>;
 }
 
 /** Asks one session to retire itself. */
@@ -81,7 +80,8 @@ export const ABANDONED_DRAFT_SWEEP_CRON = "23 * * * *";
 
 export interface AbandonedDraftSweepResult {
   candidates: number;
-  archived: number;
+  /** Empty drafts discarded, index row included. */
+  discarded: number;
   /** Session had already left `created`; the index was stale and was repaired. */
   notDraft: number;
   /** Session still `created` but holds messages — a prompt that never dispatched. */
@@ -144,7 +144,7 @@ export class AbandonedDraftSweep {
   async run(now: number): Promise<AbandonedDraftSweepResult> {
     const empty: AbandonedDraftSweepResult = {
       candidates: 0,
-      archived: 0,
+      discarded: 0,
       notDraft: 0,
       hasWork: 0,
       missing: 0,
@@ -171,7 +171,7 @@ export class AbandonedDraftSweep {
 
     const result: AbandonedDraftSweepResult = {
       candidates: candidates.length,
-      archived: 0,
+      discarded: 0,
       notDraft: 0,
       hasWork: 0,
       missing: 0,
@@ -187,8 +187,8 @@ export class AbandonedDraftSweep {
           session_id: candidates[index],
           error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason),
         });
-      } else if (outcome.value === "archived") {
-        result.archived += 1;
+      } else if (outcome.value === "discarded") {
+        result.discarded += 1;
       } else if (outcome.value === "not_draft") {
         result.notDraft += 1;
       } else if (outcome.value === "has_work") {
@@ -203,7 +203,7 @@ export class AbandonedDraftSweep {
     this.log.info("Abandoned draft sweep completed", {
       event: "scheduler.abandoned_draft_sweep",
       candidates: result.candidates,
-      archived: result.archived,
+      discarded: result.discarded,
       not_draft: result.notDraft,
       has_work: result.hasWork,
       missing: result.missing,
@@ -227,17 +227,15 @@ export class AbandonedDraftSweep {
   }
 
   /**
-   * An expired draft never held a message, so its index row is deleted rather
-   * than left in the Archived list. A missing session is retired here rather
-   * than by its Durable Object: there is no Durable Object to do it, which is
-   * exactly what the 404 established, and with no runtime to confirm the
-   * session was empty the row is archived, not deleted.
+   * The Durable Object discards a draft whole, index row included. A missing
+   * session is retired here rather than by its Durable Object: there is no
+   * Durable Object to do it, which is exactly what the 404 established, and
+   * with no runtime to confirm the session was empty the row is archived, not
+   * deleted.
    */
   private async expireOne(sessionId: string): Promise<DraftSweepOutcome> {
     const outcome = await this.client.expireDraft(sessionId);
-    if (outcome === "archived") {
-      await this.index.deleteExpiredDraft(sessionId);
-    } else if (outcome === "missing") {
+    if (outcome === "missing") {
       await this.index.archiveOrphanedDraft(sessionId);
     }
     return outcome;

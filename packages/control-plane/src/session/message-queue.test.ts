@@ -240,10 +240,7 @@ function buildQueue(
     reportSandboxError: vi.fn((_reason: string) => {}),
   };
   const backgroundTasks = createTestBackgroundTasks();
-  const sessionIndex = {
-    touchUpdatedAt: vi.fn(async () => true),
-    updateModel: vi.fn(async () => true),
-  };
+  const sessionIndex = { touchUpdatedAt: vi.fn(async () => true) };
   const getAlarm = vi.fn(async () => null as number | null);
   const setAlarm = vi.fn(async (_timestamp: number) => {});
   const alarmDeadlines = {

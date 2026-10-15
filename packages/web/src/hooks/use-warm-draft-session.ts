@@ -61,21 +61,78 @@ export function warmDraftSessionIdentity(
   );
 }
 
-interface PendingCreation {
-  promise: Promise<string | null>;
-  /** A submit owns the result; the hook must not discard it. */
-  claimed: boolean;
+/** What one creation attempt produced: a draft, or the reason there is none. */
+export type WarmDraftResult =
+  { sessionId: string; error: null } | { sessionId: null; error: WarmDraftSessionError | null };
+
+/**
+ * One creation attempt, from request to draft. Exactly one party owns it at a
+ * time: the hook while it warms the composer's current launch, the submit that
+ * claimed it, or nobody once its launch was superseded or the composer left.
+ * Only a hook-owned attempt publishes state; an ownerless one discards the
+ * draft it produces.
+ */
+interface WarmAttempt {
+  owner: "hook" | "submit" | "none";
+  result: Promise<WarmDraftResult>;
+  /** Set once a hook-owned attempt has produced its draft. */
+  sessionId: string | null;
+}
+
+async function createDraft(launchRequest: WarmDraftSessionRequest): Promise<WarmDraftResult> {
+  try {
+    const response = await browserApiFetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(launchRequest),
+    });
+    if (!response.ok) {
+      const failure: unknown = await response.json().catch(() => null);
+      let message = "Failed to create session";
+      let code: string | null = null;
+      if (failure && typeof failure === "object") {
+        if ("error" in failure && typeof failure.error === "string") message = failure.error;
+        if ("code" in failure && typeof failure.code === "string") code = failure.code;
+        if (
+          code === "target_team_missing_grant" &&
+          "repository" in failure &&
+          typeof failure.repository === "string"
+        ) {
+          message = `This team has no repository grant for ${failure.repository}.`;
+        }
+      }
+      return {
+        sessionId: null,
+        error: {
+          message: code ? `${message} (${code})` : message,
+          code,
+          status: response.status,
+          // Grants can be restored without changing the draft's identity.
+          terminal:
+            code !== "target_team_missing_grant" && [400, 403, 404, 409].includes(response.status),
+        },
+      };
+    }
+    const parsed = createSessionResponseSchema.safeParse(await response.json().catch(() => null));
+    return parsed.success
+      ? { sessionId: parsed.data.sessionId, error: null }
+      : { sessionId: null, error: null };
+  } catch (error) {
+    console.error("Failed to create session for warming:", error);
+    return { sessionId: null, error: null };
+  }
 }
 
 /**
  * Keeps one draft session ready for the composer's current request.
  *
  * Creation is never aborted: the server finishes creating a draft whether or
- * not the browser is still listening, so an abort only loses track of it. A
- * creation that resolves after its draft was superseded, or after the composer
- * unmounted, is discarded instead. A submit `claim`s the draft, after which
- * neither unmount nor a request change discards it; `release` hands back one
- * whose first prompt was not sent.
+ * not the browser is still listening, so an abort only loses track of it.
+ * Instead each attempt carries its owner (see `WarmAttempt`). A request change
+ * or unmount gives up the hook's attempt — discarding its draft now, or when
+ * it arrives — and `claim` hands the attempt to a submit, which receives its
+ * draft or its error. `release` takes back a claimed draft whose first prompt
+ * was not sent.
  */
 export function useWarmDraftSession(
   request: WarmDraftSessionRequest | null,
@@ -84,8 +141,7 @@ export function useWarmDraftSession(
   const identity = warmDraftSessionIdentity(request, routingIdentity);
   const requestRef = useRef(request);
   const identityRef = useRef(identity);
-  const sessionIdRef = useRef<string | null>(null);
-  const pendingRef = useRef<PendingCreation | null>(null);
+  const ownedRef = useRef<WarmAttempt | null>(null);
   const disposedRef = useRef(false);
   const errorRef = useRef<WarmDraftSessionError | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -97,142 +153,100 @@ export function useWarmDraftSession(
     identityRef.current = identity;
   }, [identity, request]);
 
+  /** The hook stops owning its attempt; whatever draft it holds or will hold is discarded. */
+  const abandonOwnedAttempt = useCallback(() => {
+    const attempt = ownedRef.current;
+    ownedRef.current = null;
+    if (!attempt) return;
+    attempt.owner = "none";
+    if (attempt.sessionId) void discardWarmDraftSession(attempt.sessionId);
+  }, []);
+
   useLayoutEffect(() => {
-    pendingRef.current = null;
+    abandonOwnedAttempt();
+    setSessionId(null);
     setIsWarming(false);
     errorRef.current = null;
     setError(null);
-
-    const supersededSessionId = sessionIdRef.current;
-    sessionIdRef.current = null;
-    setSessionId(null);
-    if (supersededSessionId) void discardWarmDraftSession(supersededSessionId);
-  }, [identity]);
+  }, [abandonOwnedAttempt, identity]);
 
   useEffect(() => {
     disposedRef.current = false;
     return () => {
       disposedRef.current = true;
-      const abandonedSessionId = sessionIdRef.current;
-      sessionIdRef.current = null;
-      if (abandonedSessionId) void discardWarmDraftSession(abandonedSessionId);
+      abandonOwnedAttempt();
     };
-  }, []);
+  }, [abandonOwnedAttempt]);
 
-  const warm = useCallback(async (): Promise<string | null> => {
-    if (sessionIdRef.current) return sessionIdRef.current;
-    if (pendingRef.current) return pendingRef.current.promise;
-    if (errorRef.current?.terminal) return null;
-
+  /** Starts a hook-owned attempt for the current launch, or returns null when there is none. */
+  const startAttempt = useCallback((): WarmAttempt | null => {
     const launchRequest = requestRef.current;
-    const launchIdentity = identityRef.current;
-    if (!launchRequest || !launchIdentity) return null;
+    if (!launchRequest || !identityRef.current) return null;
 
+    const attempt: WarmAttempt = {
+      owner: "hook",
+      sessionId: null,
+      result: Promise.resolve({ sessionId: null, error: null }),
+    };
+    attempt.result = createDraft(launchRequest).then((result) => {
+      if (attempt.owner === "hook") {
+        if (result.sessionId) {
+          attempt.sessionId = result.sessionId;
+          setSessionId(result.sessionId);
+        } else {
+          ownedRef.current = null;
+          errorRef.current = result.error;
+          setError(result.error);
+        }
+        setIsWarming(false);
+      } else if (attempt.owner === "none" && result.sessionId) {
+        void discardWarmDraftSession(result.sessionId);
+      }
+      return result;
+    });
+
+    ownedRef.current = attempt;
     setIsWarming(true);
     errorRef.current = null;
     setError(null);
-
-    const pending: PendingCreation = { promise: Promise.resolve(null), claimed: false };
-    const isCurrent = () => !disposedRef.current && identityRef.current === launchIdentity;
-
-    pending.promise = (async () => {
-      try {
-        const response = await browserApiFetch("/api/sessions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(launchRequest),
-        });
-        if (!response.ok) {
-          const failure: unknown = await response.json().catch(() => null);
-          // The error state describes the current launch: a claimant whose
-          // launch was superseded gets null and reports the failure itself,
-          // so its refusal cannot block the new target's sends.
-          if (!isCurrent()) return null;
-          let message = "Failed to create session";
-          let code: string | null = null;
-          if (failure && typeof failure === "object") {
-            if ("error" in failure && typeof failure.error === "string") message = failure.error;
-            if ("code" in failure && typeof failure.code === "string") code = failure.code;
-            if (
-              code === "target_team_missing_grant" &&
-              "repository" in failure &&
-              typeof failure.repository === "string"
-            ) {
-              message = `This team has no repository grant for ${failure.repository}.`;
-            }
-          }
-          const creationError: WarmDraftSessionError = {
-            message: code ? `${message} (${code})` : message,
-            code,
-            status: response.status,
-            // Grants can be restored without changing the draft's identity.
-            terminal:
-              code !== "target_team_missing_grant" &&
-              [400, 403, 404, 409].includes(response.status),
-          };
-          errorRef.current = creationError;
-          setError(creationError);
-          return null;
-        }
-
-        const parsed = createSessionResponseSchema.safeParse(
-          await response.json().catch(() => null)
-        );
-        if (!parsed.success) return null;
-        const { sessionId } = parsed.data;
-        if (pending.claimed) return sessionId;
-        if (!isCurrent()) {
-          void discardWarmDraftSession(sessionId);
-          return null;
-        }
-
-        sessionIdRef.current = sessionId;
-        setSessionId(sessionId);
-        return sessionId;
-      } catch (error) {
-        console.error("Failed to create session for warming:", error);
-        return null;
-      } finally {
-        if (pendingRef.current === pending) {
-          pendingRef.current = null;
-          setIsWarming(false);
-        }
-      }
-    })();
-
-    pendingRef.current = pending;
-    return pending.promise;
+    return attempt;
   }, []);
 
-  /** Takes ownership of the ready or in-flight draft, starting one if needed. */
-  const claim = useCallback(async (): Promise<string | null> => {
-    const ready = sessionIdRef.current;
-    if (ready) {
-      sessionIdRef.current = null;
-      setSessionId(null);
-      return ready;
-    }
-    if (!pendingRef.current) void warm();
-    const pending = pendingRef.current;
-    if (!pending) return null;
-    pending.claimed = true;
-    pendingRef.current = null;
+  const warm = useCallback(async (): Promise<string | null> => {
+    const owned = ownedRef.current;
+    if (owned) return owned.sessionId ?? (await owned.result).sessionId;
+    if (errorRef.current?.terminal) return null;
+    const attempt = startAttempt();
+    return attempt ? (await attempt.result).sessionId : null;
+  }, [startAttempt]);
+
+  /** Takes ownership of the ready or warming draft, starting one if needed. */
+  const claim = useCallback(async (): Promise<WarmDraftResult> => {
+    const attempt = ownedRef.current ?? (errorRef.current?.terminal ? null : startAttempt());
+    if (!attempt) return { sessionId: null, error: errorRef.current };
+    ownedRef.current = null;
+    attempt.owner = "submit";
+    setSessionId(null);
     setIsWarming(false);
-    return pending.promise;
-  }, [warm]);
+    return attempt.sessionId ? { sessionId: attempt.sessionId, error: null } : attempt.result;
+  }, [startAttempt]);
 
   /**
    * Hands back a claimed draft whose first prompt was not sent. It becomes the
-   * warm draft again while the composer still wants that launch, and is
-   * discarded otherwise. The discard is a no-op for a session that did receive
-   * the prompt, so an ambiguous failure cannot lose work.
+   * hook's draft again while the composer still wants that launch and holds no
+   * other, and is discarded otherwise. The discard is a no-op for a session
+   * that did receive the prompt, so an ambiguous failure cannot lose work.
    */
   const release = useCallback((releasedSessionId: string, launchIdentity: string | null) => {
-    if (disposedRef.current || launchIdentity !== identityRef.current || sessionIdRef.current) {
+    if (disposedRef.current || launchIdentity !== identityRef.current || ownedRef.current) {
       void discardWarmDraftSession(releasedSessionId);
       return;
     }
-    sessionIdRef.current = releasedSessionId;
+    ownedRef.current = {
+      owner: "hook",
+      sessionId: releasedSessionId,
+      result: Promise.resolve({ sessionId: releasedSessionId, error: null }),
+    };
     setSessionId(releasedSessionId);
   }, []);
 

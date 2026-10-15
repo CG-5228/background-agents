@@ -12,7 +12,10 @@ import { SessionInternalPaths } from "./contracts";
 import type { SessionRuntimeClient } from "./runtime-client";
 import type { Logger } from "../logger";
 import type { SessionIndexStore } from "../db/session-index";
-import type { SessionStatusProjectionStore } from "../db/session-status-projection-store";
+import type {
+  ProjectedSessionSettings,
+  SessionStatusProjectionStore,
+} from "../db/session-status-projection-store";
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
 import type { SessionRow } from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
@@ -70,7 +73,8 @@ export class SessionStatusService {
         publicSessionId,
         status,
         session.updated_at,
-        session.status_revision
+        session.status_revision,
+        projectedSettings(session)
       )
         .catch((error) =>
           this.logSessionIndexStatusSyncError(publicSessionId, status, session.updated_at, error)
@@ -109,7 +113,13 @@ export class SessionStatusService {
 
     const publicSessionId = this.getPublicSessionId(session);
     const repaired = await this.statusProjection
-      .project(publicSessionId, session.status, session.status_revision, session.updated_at)
+      .project(
+        publicSessionId,
+        session.status,
+        session.status_revision,
+        session.updated_at,
+        projectedSettings(session)
+      )
       .catch((error) => {
         this.logSessionIndexStatusSyncError(
           publicSessionId,
@@ -138,7 +148,8 @@ export class SessionStatusService {
         publicSessionId,
         session.status,
         session.status_revision,
-        session.updated_at
+        session.updated_at,
+        projectedSettings(session)
       );
       const current = this.repository.getSession();
       if (
@@ -213,7 +224,8 @@ export class SessionStatusService {
       publicSessionId,
       status,
       updatedAt,
-      revision
+      revision,
+      projectedSettings(session)
     ).catch((error) =>
       this.logSessionIndexStatusSyncError(publicSessionId, status, updatedAt, error)
     );
@@ -348,9 +360,16 @@ export class SessionStatusService {
     sessionId: string,
     status: SessionStatus,
     updatedAt: number,
-    revision: number
+    revision: number,
+    settings: ProjectedSessionSettings
   ): Promise<void> {
-    const projected = await this.statusProjection.project(sessionId, status, revision, updatedAt);
+    const projected = await this.statusProjection.project(
+      sessionId,
+      status,
+      revision,
+      updatedAt,
+      settings
+    );
     if (projected && status === "active") {
       await this.sessionIndex.finalizeChildAdmission(sessionId);
     }
@@ -428,4 +447,8 @@ export class SessionStatusService {
       cacheWriteTokens: tokens.cacheWriteTokens ?? 0,
     });
   }
+}
+
+function projectedSettings(session: SessionRow): ProjectedSessionSettings {
+  return { model: session.model, reasoningEffort: session.reasoning_effort };
 }

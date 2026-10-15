@@ -403,13 +403,13 @@ describe("DO internal sub-session routes", () => {
   });
 
   describe("POST /internal/expire-draft", () => {
-    it("archives a session that never left the draft status", async () => {
+    it("discards a session that never left the draft status", async () => {
       const { stub } = await initSession();
 
       const res = await stub.fetch("http://internal/internal/expire-draft", { method: "POST" });
 
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ outcome: "archived", status: "archived" });
+      expect(await res.json()).toEqual({ outcome: "discarded", status: "archived" });
       const rows = await queryDO<{ status: string }>(stub, "SELECT status FROM session LIMIT 1");
       expect(rows[0].status).toBe("archived");
     });
@@ -421,7 +421,7 @@ describe("DO internal sub-session routes", () => {
 
       const res = await stub.fetch("http://internal/internal/expire-draft", { method: "POST" });
 
-      expect(await res.json()).toEqual({ outcome: "archived", status: "archived" });
+      expect(await res.json()).toEqual({ outcome: "discarded", status: "archived" });
       const sandboxes = await queryDO<{ status: string }>(stub, "SELECT status FROM sandbox");
       expect(sandboxes.map((row) => row.status)).toEqual(["stopped"]);
     });
@@ -527,14 +527,14 @@ describe("DO internal sub-session routes", () => {
       expect(rows[0].status).not.toBe("archived");
     });
 
-    it("is idempotent across repeated sweeps", async () => {
+    it("answers a repeated discard with the same outcome, finishing its cleanup again", async () => {
       const { stub } = await initSession();
 
       await stub.fetch("http://internal/internal/expire-draft", { method: "POST" });
       const second = await stub.fetch("http://internal/internal/expire-draft", { method: "POST" });
 
       expect(second.status).toBe(200);
-      expect(await second.json()).toEqual({ outcome: "not_draft", status: "archived" });
+      expect(await second.json()).toEqual({ outcome: "discarded", status: "archived" });
     });
   });
 });

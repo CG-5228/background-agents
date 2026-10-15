@@ -417,10 +417,12 @@ export default function Home() {
     let sent = false;
     try {
       // The draft is ours from here on: leaving the page or changing the
-      // launch target no longer discards it underneath the send.
-      sessionId = await claimWarmSession();
+      // launch target no longer discards it underneath the send, and a
+      // failure to create it is ours to report.
+      const claimed = await claimWarmSession();
+      sessionId = claimed.sessionId;
       if (!sessionId) {
-        setError("Failed to create session");
+        setError(claimed.error?.message ?? "Failed to create session");
         return;
       }
 

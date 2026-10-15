@@ -1,8 +1,11 @@
-import { env } from "cloudflare:test";
+import { createExecutionContext, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import worker from "../../src/index";
 import { SessionIndexStore } from "../../src/db/session-index";
+import { ABANDONED_DRAFT_SWEEP_CRON } from "../../src/session/abandoned-draft-sweep";
+import type { WorkerBindings } from "../../src/cloudflare/platform";
 import { cleanD1Tables } from "./cleanup";
-import { seedActiveUser, serviceFetch } from "./helpers";
+import { queryDO, seedActiveUser, serviceFetch } from "./helpers";
 
 const BASE = "https://test.local";
 const STRANGER = "33333333333333333333333333333333";
@@ -58,6 +61,52 @@ describe("POST /sessions/:id/discard-draft", () => {
     expect((await repositories())?.count).toBe(0);
     expect(await listedIds("excludeStatus=archived")).toEqual([]);
     expect(await listedIds("status=archived")).toEqual([]);
+  });
+
+  /**
+   * What a discard leaves when it fails after committing: the runtime has
+   * decided (discarded, locally archived) but the index row still reads
+   * `created`.
+   */
+  async function halfDiscardedDraft(): Promise<string> {
+    const sessionId = await createDraft();
+    const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
+    await queryDO(
+      stub,
+      "UPDATE session SET discarded_at = 1, status = 'archived', status_revision = status_revision + 1"
+    );
+    expect((await new SessionIndexStore(env.DB).get(sessionId))?.status).toBe("created");
+    return sessionId;
+  }
+
+  it("finishes a discard that failed after the runtime committed it", async () => {
+    const sessionId = await halfDiscardedDraft();
+    // Nothing can start work in it meanwhile.
+    const prompted = await request(`/sessions/${sessionId}/prompt`, "POST", {
+      content: "Too late",
+      source: "web",
+    });
+    expect(prompted.status).toBe(409);
+
+    const retried = await request(`/sessions/${sessionId}/discard-draft`, "POST");
+
+    expect(await retried.json()).toEqual({ outcome: "discarded" });
+    expect(await new SessionIndexStore(env.DB).get(sessionId)).toBeNull();
+  });
+
+  it("lets the sweep finish a discard nobody retried", async () => {
+    const sessionId = await halfDiscardedDraft();
+    await env.DB.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?")
+      .bind(Date.now() - 48 * 60 * 60 * 1000, sessionId)
+      .run();
+
+    await worker.scheduled(
+      { cron: ABANDONED_DRAFT_SWEEP_CRON } as ScheduledEvent,
+      env as unknown as WorkerBindings,
+      createExecutionContext()
+    );
+
+    expect(await new SessionIndexStore(env.DB).get(sessionId)).toBeNull();
   });
 
   it("leaves a prompted session untouched, so a discard can never race a send", async () => {
@@ -201,6 +250,26 @@ describe("first prompt into a draft", () => {
       model: "anthropic/claude-opus-4-6",
       reasoningEffort: "high",
     });
+  });
+
+  it("keeps an inherited effort when the first prompt repeats the model without one", async () => {
+    const sessionId = await createDraft({ reasoningEffort: "max" });
+
+    await request(`/sessions/${sessionId}/prompt`, "POST", {
+      content: "First",
+      source: "web",
+      model: "anthropic/claude-sonnet-4-6",
+    });
+
+    const response = await request(`/sessions/${sessionId}`);
+    const snapshot = await response.json<{
+      session: { model: string; reasoningEffort?: string };
+    }>();
+    expect(snapshot.session).toMatchObject({
+      model: "anthropic/claude-sonnet-4-6",
+      reasoningEffort: "max",
+    });
+    expect((await new SessionIndexStore(env.DB).get(sessionId))?.reasoningEffort).toBe("max");
   });
 
   it("keeps the draft's model when the first prompt names none", async () => {

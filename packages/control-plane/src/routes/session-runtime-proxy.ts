@@ -322,8 +322,9 @@ function lifecycleProxy(internalPath: SessionInternalPath): ProxyHandler {
  * composer call it whenever a draft is abandoned without racing a send. A
  * discarded draft's index row is deleted, so it never appears in a list.
  *
- * Deleting cannot be undone, so only the draft's creator may do it; lifecycle
- * access alone would let any member discard another member's visible draft.
+ * Deleting cannot be undone, so the route is admitted under the deletion
+ * policy, and only the draft's creator may use it: an empty session is still
+ * someone else's to delete.
  */
 async function handleDiscardDraft(
   _request: Request,
@@ -337,11 +338,12 @@ async function handleDiscardDraft(
     return json({ error: "Only the session's creator can discard its draft" }, 403);
   }
 
+  // The runtime discards the draft whole, index row included, and finishes an
+  // earlier discard that failed part-way; this only reports its answer.
   const outcome = await new SessionDraftExpiryClient(ctx.sessionRuntime).expireDraft(params.id);
   if (outcome === "missing") return error("Session not found", 404);
-  if (outcome !== "archived") return json({ outcome });
+  if (outcome !== "discarded") return json({ outcome });
 
-  await new SessionIndexStore(ctx.db).deleteExpiredDraft(params.id);
   logger.info("session.draft_discarded", {
     event: "session.draft_discarded",
     session_id: params.id,
@@ -511,8 +513,10 @@ sessionRuntimeProxyRoutes.patch("/sessions/:id/title", LIFECYCLE, (c) =>
 sessionRuntimeProxyRoutes.post("/sessions/:id/archive", LIFECYCLE, (c) =>
   dispatchSession(c, lifecycleProxy(SessionInternalPaths.archive))
 );
-sessionRuntimeProxyRoutes.post("/sessions/:id/discard-draft", LIFECYCLE, (c) =>
-  dispatchSession(c, handleDiscardDraft)
+sessionRuntimeProxyRoutes.post(
+  "/sessions/:id/discard-draft",
+  admit({ ...GITHUB_USER_OR_SERVICE_ROUTE, authorization: requireSession("delete") }),
+  (c) => dispatchSession(c, handleDiscardDraft)
 );
 sessionRuntimeProxyRoutes.post("/sessions/:id/unarchive", LIFECYCLE, (c) =>
   dispatchSession(c, lifecycleProxy(SessionInternalPaths.unarchive))

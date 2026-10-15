@@ -39,7 +39,7 @@ describe("abandoned draft sweep cron routing", () => {
   it("routes the draft-sweep cron to the sweep instead of the automation scheduler", async () => {
     await seedStaleDraft("stale-draft");
     const sessionNamespace = createSessionNamespace(() =>
-      Response.json({ outcome: "archived", status: "archived" })
+      Response.json({ outcome: "discarded", status: "archived" })
     );
 
     await worker.scheduled(
@@ -54,15 +54,12 @@ describe("abandoned draft sweep cron routing", () => {
     // Proves the sweep actually ran rather than falling through to the
     // unknown-trigger branch, which would leave the session untouched.
     expect(sessionNamespace.idFromName).toHaveBeenCalledWith("stale-draft");
-    // The runtime confirmed an empty draft, so the row leaves every list,
-    // including Archived.
-    expect(await new SessionIndexStore(env.DB).get("stale-draft")).toBeNull();
   });
 
   it("leaves the draft sweep alone on the automation tick", async () => {
     await seedStaleDraft("stale-draft");
     const sessionNamespace = createSessionNamespace(() =>
-      Response.json({ outcome: "archived", status: "archived" })
+      Response.json({ outcome: "discarded", status: "archived" })
     );
 
     await worker.scheduled(

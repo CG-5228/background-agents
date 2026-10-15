@@ -19,7 +19,8 @@ function createHandler() {
     {} as SessionTitleService,
     { cancelSandbox: vi.fn(), preserveForArchive },
     "session-do-id",
-    vi.fn()
+    vi.fn(),
+    { deleteExpiredDraft: vi.fn(async () => true) }
   );
   return { handler, beginTransition, confirmIndexStatus, preserveForArchive };
 }
@@ -50,5 +51,98 @@ describe("SessionLifecycleHandler.archive", () => {
 
     expect(preserveForArchive).not.toHaveBeenCalled();
     expect(confirmIndexStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("SessionLifecycleHandler.expireDraft", () => {
+  function createDraftHandler(
+    options: { status?: "created" | "active"; deleteFails?: boolean } = {}
+  ) {
+    const session = { ...createMockSession(), status: options.status ?? "created" };
+    let discarded = false;
+    const events: string[] = [];
+    const repository = {
+      getSession: () => session,
+      isSessionDiscarded: () => discarded,
+      markSessionDiscarded: vi.fn(() => {
+        discarded = true;
+        events.push("mark");
+      }),
+      updateSessionStatus: vi.fn((_id: string, status: string) => {
+        session.status = status as typeof session.status;
+        events.push(`status:${status}`);
+      }),
+    };
+    const statusService = {
+      transition: vi.fn(),
+      beginTransition: vi.fn(),
+      repairIndexStatus: vi.fn(async () => undefined),
+    };
+    const cancelSandbox = vi.fn(async () => {
+      events.push("cancel");
+    });
+    let failDelete = options.deleteFails ?? false;
+    const deleteExpiredDraft = vi.fn(async () => {
+      events.push("delete");
+      if (failDelete) throw new Error("D1 unavailable");
+      return true;
+    });
+    const handler = new SessionLifecycleHandler(
+      repository as unknown as SessionCoreRepository,
+      {} as SandboxStateReader,
+      { getPendingOrProcessingCount: () => 0, getMessageCount: () => 0 } as MessageRepository,
+      statusService as unknown as SessionStatusService,
+      {} as SessionTitleService,
+      { cancelSandbox, preserveForArchive: vi.fn() },
+      "session-do-id",
+      vi.fn(),
+      { deleteExpiredDraft }
+    );
+    return {
+      handler,
+      events,
+      statusService,
+      deleteExpiredDraft,
+      recover: () => {
+        failDelete = false;
+      },
+    };
+  }
+
+  it("commits the discard before any I/O and never projects the archive", async () => {
+    const { handler, events, statusService } = createDraftHandler();
+
+    const response = await handler.expireDraft();
+
+    expect(await response.json()).toEqual({ outcome: "discarded", status: "archived" });
+    expect(events).toEqual(["mark", "status:archived", "cancel", "delete"]);
+    // The index keeps reading `created` until its row is deleted.
+    expect(statusService.transition).not.toHaveBeenCalled();
+    expect(statusService.beginTransition).not.toHaveBeenCalled();
+  });
+
+  it("finishes a discard whose index delete failed on the next call", async () => {
+    const { handler, events, deleteExpiredDraft, recover } = createDraftHandler({
+      deleteFails: true,
+    });
+
+    await expect(handler.expireDraft()).rejects.toThrow("D1 unavailable");
+    recover();
+    const retried = await handler.expireDraft();
+
+    expect(await retried.json()).toEqual({ outcome: "discarded", status: "archived" });
+    expect(deleteExpiredDraft).toHaveBeenCalledTimes(2);
+    // The decision was made once; the retry only repeats the cleanup.
+    expect(events.filter((event) => event === "mark")).toEqual(["mark"]);
+  });
+
+  it("leaves a session that is not a draft alone", async () => {
+    const { handler, events, deleteExpiredDraft } = createDraftHandler({ status: "active" });
+
+    const response = await handler.expireDraft();
+
+    expect(await response.json()).toEqual({ outcome: "not_draft", status: "active" });
+    expect(events).toEqual([]);
+    expect(deleteExpiredDraft).not.toHaveBeenCalled();
   });
 });

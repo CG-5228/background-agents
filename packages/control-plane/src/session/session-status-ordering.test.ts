@@ -16,10 +16,14 @@ it("a delayed archive projection cannot overwrite a successful equal-timestamp u
   try {
     await db
       .prepare(
-        "CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, updated_at INTEGER, status_revision INTEGER NOT NULL DEFAULT 0)"
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT, updated_at INTEGER, status_revision INTEGER NOT NULL DEFAULT 0, model TEXT, reasoning_effort TEXT)"
       )
       .run();
-    await db.prepare("INSERT INTO sessions VALUES ('one', 'completed', 5000, 0)").run();
+    await db
+      .prepare(
+        "INSERT INTO sessions (id, status, updated_at, status_revision) VALUES ('one', 'completed', 5000, 0)"
+      )
+      .run();
     const storage = createNodeSqlStorage(sqlite);
     initSchema(storage.sql);
     storage.sql.exec(
@@ -47,12 +51,12 @@ it("a delayed archive projection cannot overwrite a successful equal-timestamp u
       { broadcast: () => {} } as never,
       store,
       {
-        project: async (id, status, revision, updatedAt) => {
+        project: async (id, status, revision, updatedAt, settings) => {
           if (status === "archived") {
             projectionStarted();
             await gate;
           }
-          return realProjection.project(id, status, revision, updatedAt);
+          return realProjection.project(id, status, revision, updatedAt, settings);
         },
       },
       { fetch: async () => new Response() }

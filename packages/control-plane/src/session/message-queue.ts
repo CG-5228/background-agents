@@ -166,7 +166,7 @@ export class SessionMessageQueue {
     private readonly getProviderAuthenticationError: (model: string) => Promise<string | null>,
     private readonly messageFailures: MessageFailureService,
     private readonly sandboxLifecycle: SandboxLifecycle,
-    private readonly sessionIndex: Pick<SessionIndexStore, "touchUpdatedAt" | "updateModel">,
+    private readonly sessionIndex: Pick<SessionIndexStore, "touchUpdatedAt">,
     private readonly scmProvider: SourceControlProviderName,
     private readonly alarmScheduler: AlarmScheduler,
     private readonly executionStop: ExecutionStopCoordinator,
@@ -910,12 +910,9 @@ export class SessionMessageQueue {
         : null;
     const reasoningEffort = messageEffort ?? inheritedEffort;
     if (session.model === model && (session.reasoning_effort ?? null) === reasoningEffort) return;
+    // The index learns it from the status projection the caller's transition
+    // to `active` makes next, and from every later one if that write fails.
     this.repository.updateSessionModel(session.id, model, reasoningEffort);
-    const sessionId = session.session_name || session.id;
-    this.backgroundTasks.submit(
-      () => this.sessionIndex.updateModel(sessionId, model, reasoningEffort),
-      { name: "session_index.update_model", context: { session_id: sessionId } }
-    );
   }
 
   /** Refresh the session index's activity timestamp in the background. */

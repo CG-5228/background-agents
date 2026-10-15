@@ -9,6 +9,7 @@ import type { InteractiveProviderRoutingIdentity } from "@/lib/provider-selectio
 import {
   useWarmDraftSession,
   warmDraftSessionIdentity,
+  type WarmDraftResult,
   type WarmDraftSessionRequest,
 } from "./use-warm-draft-session";
 
@@ -593,13 +594,13 @@ describe("useWarmDraftSession claims", () => {
       await result.current.warm();
     });
 
-    let claimed: string | null = null;
+    let claimed: WarmDraftResult | null = null;
     await act(async () => {
       claimed = await result.current.claim();
     });
     unmount();
 
-    expect(claimed).toBe("session-1");
+    expect(claimed).toEqual({ sessionId: "session-1", error: null });
     expect(result.current.sessionId).toBeNull();
     expect(discardWarmDraftSession).not.toHaveBeenCalled();
   });
@@ -617,7 +618,7 @@ describe("useWarmDraftSession claims", () => {
       void result.current.warm();
     });
 
-    let claiming: Promise<string | null> | undefined;
+    let claiming: Promise<WarmDraftResult> | undefined;
     act(() => {
       claiming = result.current.claim();
     });
@@ -625,7 +626,7 @@ describe("useWarmDraftSession claims", () => {
     unmount();
     resolveCreate?.(Response.json({ sessionId: "claimed-session", status: "created" }));
 
-    await expect(claiming).resolves.toBe("claimed-session");
+    await expect(claiming).resolves.toEqual({ sessionId: "claimed-session", error: null });
     expect(discardWarmDraftSession).not.toHaveBeenCalled();
     expect(browserApiFetch).toHaveBeenCalledTimes(1);
   });
@@ -636,7 +637,10 @@ describe("useWarmDraftSession claims", () => {
     );
     const { result } = renderHook(() => useWarmDraftSession(request()));
     await act(async () => {
-      await expect(result.current.claim()).resolves.toBe("session-1");
+      await expect(result.current.claim()).resolves.toEqual({
+        sessionId: "session-1",
+        error: null,
+      });
     });
     expect(result.current.sessionId).toBeNull();
   });
@@ -681,37 +685,98 @@ describe("useWarmDraftSession claims", () => {
   });
 });
 
-describe("useWarmDraftSession superseded claims", () => {
+describe("useWarmDraftSession attempt ownership", () => {
   beforeEach(() => vi.resetAllMocks());
 
-  it("keeps a superseded claim's refusal out of the new target's error state", async () => {
-    let resolveCreate: ((response: Response) => void) | undefined;
-    vi.mocked(browserApiFetch).mockImplementationOnce(
-      () => new Promise<Response>((resolve) => (resolveCreate = resolve))
+  function deferredCreates() {
+    const resolvers: Array<(response: Response) => void> = [];
+    vi.mocked(browserApiFetch).mockImplementation(
+      () => new Promise<Response>((resolve) => resolvers.push(resolve))
     );
+    return resolvers;
+  }
+
+  it("discards a stale attempt that settles after a newer one for the same launch (A -> B -> A)", async () => {
+    const creates = deferredCreates();
+    const { result, rerender, unmount } = renderHook(
+      ({ launchRequest }) => useWarmDraftSession(launchRequest),
+      { initialProps: { launchRequest: request() } }
+    );
+    act(() => {
+      void result.current.warm();
+    });
+    rerender({ launchRequest: otherRepository() });
+    rerender({ launchRequest: request() });
+    let warming: Promise<string | null> | undefined;
+    act(() => {
+      warming = result.current.warm();
+    });
+
+    await act(async () => {
+      creates[1](Response.json({ sessionId: "a2", status: "created" }));
+      await warming;
+    });
+    await act(async () => {
+      creates[0](Response.json({ sessionId: "a1", status: "created" }));
+    });
+
+    expect(result.current.sessionId).toBe("a2");
+    expect(discardWarmDraftSession).toHaveBeenCalledWith("a1");
+    expect(discardWarmDraftSession).not.toHaveBeenCalledWith("a2");
+    unmount();
+    expect(discardWarmDraftSession).toHaveBeenCalledWith("a2");
+  });
+
+  it("returns a claimed attempt's refusal to its submitter, not to the launch it left (A -> B -> A)", async () => {
+    const creates = deferredCreates();
     const { result, rerender } = renderHook(
       ({ launchRequest }) => useWarmDraftSession(launchRequest),
       { initialProps: { launchRequest: request() } }
     );
-    let claiming: Promise<string | null> | undefined;
+    let claiming: Promise<WarmDraftResult> | undefined;
+    act(() => {
+      claiming = result.current.claim();
+    });
+    rerender({ launchRequest: otherRepository() });
+    rerender({ launchRequest: request() });
+
+    await act(async () => {
+      creates[0](Response.json({ error: "Forbidden", code: "not_team_member" }, { status: 403 }));
+      await expect(claiming).resolves.toMatchObject({
+        sessionId: null,
+        error: { code: "not_team_member", status: 403, terminal: true },
+      });
+    });
+
+    // The current launch is not blocked by a refusal it never received.
+    expect(result.current.error).toBeNull();
+    let warming: Promise<string | null> | undefined;
+    act(() => {
+      warming = result.current.warm();
+    });
+    await act(async () => {
+      creates[1](Response.json({ sessionId: "a2", status: "created" }));
+      await expect(warming).resolves.toBe("a2");
+    });
+  });
+
+  it("keeps a superseded claim's refusal out of a different launch's error state", async () => {
+    const creates = deferredCreates();
+    const { result, rerender } = renderHook(
+      ({ launchRequest }) => useWarmDraftSession(launchRequest),
+      { initialProps: { launchRequest: request() } }
+    );
+    let claiming: Promise<WarmDraftResult> | undefined;
     act(() => {
       claiming = result.current.claim();
     });
 
     rerender({ launchRequest: otherRepository() });
-    resolveCreate?.(
-      Response.json({ error: "Forbidden", code: "not_team_member" }, { status: 403 })
-    );
     await act(async () => {
-      await expect(claiming).resolves.toBeNull();
+      creates[0](Response.json({ error: "Forbidden", code: "not_team_member" }, { status: 403 }));
+      await expect(claiming).resolves.toMatchObject({ error: { code: "not_team_member" } });
     });
 
     expect(result.current.error).toBeNull();
-    vi.mocked(browserApiFetch).mockResolvedValueOnce(
-      Response.json({ sessionId: "session-2", status: "created" })
-    );
-    await act(async () => {
-      await expect(result.current.warm()).resolves.toBe("session-2");
-    });
   });
 });

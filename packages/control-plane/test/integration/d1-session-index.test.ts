@@ -1133,6 +1133,7 @@ describe("D1 SessionIndexStore", () => {
 
   describe("revision-fenced status repair", () => {
     const HOUR_MS = 60 * 60 * 1000;
+    const SETTINGS = { model: "anthropic/claude-haiku-4-5", reasoningEffort: null };
 
     async function seedDraft(store: SessionIndexStore, id: string, updatedAt: number) {
       await store.create({
@@ -1161,7 +1162,8 @@ describe("D1 SessionIndexStore", () => {
           "diverged",
           "completed",
           1,
-          updatedAt
+          updatedAt,
+          SETTINGS
         )
       ).toBe(true);
 
@@ -1192,7 +1194,8 @@ describe("D1 SessionIndexStore", () => {
           "index-ahead",
           "completed",
           1,
-          durableObjectUpdatedAt
+          durableObjectUpdatedAt,
+          SETTINGS
         )
       ).toBe(true);
       expect((await store.get("index-ahead"))!.status).toBe("completed");
@@ -1203,17 +1206,35 @@ describe("D1 SessionIndexStore", () => {
       await seedDraft(store, "agreed", Date.now() - 48 * HOUR_MS);
 
       const projection = new SessionStatusProjectionStore(env.DB);
-      expect(await projection.project("agreed", "created", 1, 0)).toBe(true);
-      expect(await projection.project("agreed", "created", 1, 0)).toBe(true);
+      expect(await projection.project("agreed", "created", 1, 0, SETTINGS)).toBe(true);
+      expect(await projection.project("agreed", "created", 1, 0, SETTINGS)).toBe(true);
     });
 
     it("does not overwrite a newer non-draft projection", async () => {
       const store = new SessionIndexStore(env.DB);
       await seedDraft(store, "advanced", Date.now() - 48 * HOUR_MS);
       const projection = new SessionStatusProjectionStore(env.DB);
-      expect(await projection.project("advanced", "active", 2, Date.now())).toBe(true);
-      expect(await projection.project("advanced", "completed", 1, Date.now())).toBe(false);
+      expect(await projection.project("advanced", "active", 2, Date.now(), SETTINGS)).toBe(true);
+      expect(await projection.project("advanced", "completed", 1, Date.now(), SETTINGS)).toBe(
+        false
+      );
       expect((await store.get("advanced"))!.status).toBe("active");
+    });
+
+    it("mirrors the runtime's model and effort, so a later projection repairs them", async () => {
+      const store = new SessionIndexStore(env.DB);
+      await seedDraft(store, "settings", Date.now() - 48 * HOUR_MS);
+      const projection = new SessionStatusProjectionStore(env.DB);
+      const adopted = { model: "anthropic/claude-opus-4-6", reasoningEffort: "max" };
+
+      expect(await projection.project("settings", "active", 2, Date.now(), adopted)).toBe(true);
+      expect(await store.get("settings")).toMatchObject({
+        model: "anthropic/claude-opus-4-6",
+        reasoningEffort: "max",
+      });
+      // A superseded projection cannot roll the settings back.
+      expect(await projection.project("settings", "created", 1, Date.now(), SETTINGS)).toBe(false);
+      expect((await store.get("settings"))?.model).toBe("anthropic/claude-opus-4-6");
     });
   });
 });
