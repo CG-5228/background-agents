@@ -1,7 +1,8 @@
 "use client";
 
+import { useRepositoryHomeRouter } from "@/components/repository-home-navigation";
+
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import useSWR from "swr";
 import { NewSessionButton, SearchSessionsButton, SessionSidebar } from "./session-sidebar";
 import { GlobalCommandMenu } from "./global-command-menu";
@@ -87,7 +88,7 @@ export function CollapsedSidebarControls() {
 }
 
 export function SidebarLayout({ children }: SidebarLayoutProps) {
-  const router = useRouter();
+  const router = useRepositoryHomeRouter();
   const { hasPermission } = useCurrentUserAuthorization();
   const canCreateSession = hasPermission("sessions.create");
   const sidebar = useSidebar();
@@ -106,7 +107,7 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
   });
 
   const { activeTeamId, scope, loading: teamLoading, error: teamError } = useActiveTeam();
-  const { repoFullName, repository, scopedHref } = useRepositoryHome();
+  const { repoFullName, repository } = useRepositoryHome();
   const teamContext = {
     teamIds: activeTeamId ? [activeTeamId] : undefined,
     scope,
@@ -131,17 +132,17 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
     if (isMobile) {
       sidebar.close();
     }
-    router.push(scopedHref("/"));
-  }, [canCreateSession, isMobile, router, sidebar, scopedHref]);
+    router.push("/");
+  }, [canCreateSession, isMobile, router, sidebar]);
 
   const handleNavigate = useCallback(
     (href: string) => {
       if (isMobile) {
         sidebar.close();
       }
-      router.push(scopedHref(href));
+      router.push(href);
     },
-    [isMobile, router, sidebar, scopedHref]
+    [isMobile, router, sidebar]
   );
 
   const handleOpenCommandMenu = useCallback(() => {

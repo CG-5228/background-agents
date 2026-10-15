@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
-import Link from "next/link";
+import { RepositoryHomeLink as Link } from "@/components/repository-home-navigation";
 import useSWR, { mutate } from "swr";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";

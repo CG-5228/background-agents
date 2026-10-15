@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { RepositoryHomeLink as Link } from "@/components/repository-home-navigation";
 import { useEffect, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import {

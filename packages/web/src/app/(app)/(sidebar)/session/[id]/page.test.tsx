@@ -10,8 +10,12 @@ import type { SessionDiffState } from "@open-inspect/shared/types/session-diffs"
 import { SafeMarkdown } from "@/components/safe-markdown";
 import { resolveSessionCapabilities } from "@/lib/session-capabilities";
 import SessionPage from "./page";
+import { RepositoryHomeProvider } from "@/hooks/use-repository-home";
 
 const mocks = vi.hoisted(() => ({
+  homeQuery: "",
+  push: vi.fn(),
+  archive: vi.fn(),
   socket: vi.fn(),
   prompt: vi.fn(),
   refreshSnapshot: vi.fn(),
@@ -30,8 +34,10 @@ vi.mock("next/navigation", () => ({
   notFound: () => {
     throw new Error("NEXT_NOT_FOUND");
   },
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: mocks.push }),
+  useSearchParams: () => new URLSearchParams(mocks.homeQuery),
 }));
+vi.mock("@/lib/archive-session", () => ({ archiveSession: mocks.archive }));
 vi.mock("./session-snapshot-provider", () => ({
   useSessionSnapshot: () => mocks.snapshot,
   useRefreshSessionSnapshot: () => mocks.refreshSnapshot,
@@ -115,6 +121,8 @@ vi.mock("@/components/session-changes-panel", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.homeQuery = "";
+  mocks.archive.mockResolvedValue(true);
   mocks.mobile = false;
   mocks.enabledModels = [];
   mocks.diffState = null;
@@ -192,6 +200,22 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   vi.restoreAllMocks();
+});
+
+it("returns to the scoped home after archiving from the session page", async () => {
+  mocks.homeQuery = "homeRepo=group%2Fsubgroup%2Fsite";
+  mocks.socket.mockReturnValue({
+    ...mocks.socket(),
+    capabilities: { ...mocks.socket().capabilities, lifecycle: true },
+  });
+  render(
+    <RepositoryHomeProvider>
+      <SessionPage />
+    </RepositoryHomeProvider>
+  );
+  await act(async () => mocks.actionBar.mock.lastCall?.[0].onArchive());
+  expect(mocks.archive).toHaveBeenCalledWith("session-1");
+  expect(mocks.push).toHaveBeenCalledWith("/?homeRepo=group%2Fsubgroup%2Fsite");
 });
 
 it("renders the existing not-found path before cached session content or action hooks", () => {

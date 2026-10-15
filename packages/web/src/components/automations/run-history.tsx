@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { RepositoryHomeLink as Link } from "@/components/repository-home-navigation";
 import { useState } from "react";
 import type { AutomationInvocation, AutomationRun } from "@open-inspect/shared/types/automations";
 import { Badge } from "@/components/ui/badge";

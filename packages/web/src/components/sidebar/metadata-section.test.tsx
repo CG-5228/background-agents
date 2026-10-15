@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /// <reference types="@testing-library/jest-dom" />
 
+import { RepositoryHomeProvider } from "@/hooks/use-repository-home";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -11,6 +12,9 @@ import { toast } from "sonner";
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 
 expect.extend(matchers);
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => new URLSearchParams("homeRepo=group%2Fsubgroup%2Fsite"),
+}));
 
 // This suite renders into a shared document.body without vitest globals/auto-
 // cleanup, so unmount between cases to keep queries (e.g. PR state badges) from
@@ -39,6 +43,18 @@ vi.mock("next/link", () => ({
 }));
 
 describe("MetadataSection", () => {
+  it("preserves repository-home scope when opening the inspector parent", () => {
+    render(
+      <RepositoryHomeProvider>
+        <MetadataSection createdAt={1} baseBranch="main" parentSessionId="parent" />
+      </RepositoryHomeProvider>
+    );
+    expect(screen.getByRole("link", { name: "Parent session" })).toHaveAttribute(
+      "href",
+      "/session/parent?homeRepo=group%2Fsubgroup%2Fsite"
+    );
+  });
+
   it("labels run information and keeps full repository and branch names", () => {
     const repoOwner = "northstar-engineering/developer-platform/documentation";
     const repoName = "internal-developer-portal";

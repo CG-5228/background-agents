@@ -1,7 +1,10 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import {
+  RepositoryHomeLink as Link,
+  useRepositoryHomeRouter,
+} from "@/components/repository-home-navigation";
+import { usePathname } from "next/navigation";
 import { useMemo, useCallback, useEffect, useState, type ReactNode } from "react";
 import { useAuthSession } from "@/lib/auth-session";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
@@ -93,10 +96,10 @@ export function SessionSidebar({
   const { data: authSession } = useAuthSession();
   const { hasPermission } = useCurrentUserAuthorization();
   const { activeTeamId, scope, teams } = useActiveTeam();
-  const { repoFullName, repository, scopedHref } = useRepositoryHome();
+  const { repoFullName, repository } = useRepositoryHome();
   const teamQuery = { teamIds: activeTeamId ? [activeTeamId] : undefined, scope, repository };
   const pathname = usePathname();
-  const router = useRouter();
+  const router = useRepositoryHomeRouter();
   const isMobile = useIsMobile();
 
   const currentSessionId = pathname?.startsWith("/session/") ? pathname.split("/")[2] : null;
@@ -150,10 +153,10 @@ export function SessionSidebar({
     async (sessionId: string) => {
       await handleSessionArchived(sessionId);
       if (currentSessionId === sessionId) {
-        router.push(scopedHref("/"));
+        router.push("/");
       }
     },
-    [currentSessionId, handleSessionArchived, router, scopedHref]
+    [currentSessionId, handleSessionArchived, router]
   );
 
   // Environment provenance for the cards, resolved once for the whole list.
@@ -328,7 +331,7 @@ export function SessionSidebar({
         ).map(({ href, label, icon: Icon }) => (
           <Link
             key={href}
-            href={scopedHref(href === "/sessions" ? buildSessionsHref(teamQuery) : href)}
+            href={href === "/sessions" ? buildSessionsHref(teamQuery) : href}
             onClick={handleNavigationSelect}
             aria-current={
               pathname === href || pathname?.startsWith(`${href}/`) ? "page" : undefined
@@ -427,7 +430,7 @@ export function SessionSidebar({
 
             {hasPermission("sessions.read") && (
               <Link
-                href={scopedHref(buildSessionsHref({ ...teamQuery, lifecycle: "archived" }))}
+                href={buildSessionsHref({ ...teamQuery, lifecycle: "archived" })}
                 onClick={handleNavigationSelect}
                 className="mt-2 flex items-center gap-1 px-4 py-2 text-xs font-medium uppercase tracking-wider text-secondary-foreground transition hover:bg-muted hover:text-foreground"
               >

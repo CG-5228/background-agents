@@ -17,19 +17,20 @@ import type * as ActiveTeam from "@/hooks/use-active-team";
 import { ActiveTeamProvider } from "@/hooks/use-active-team";
 import { DEFAULT_SESSION_DISCOVERY_QUERY } from "@/lib/session-discovery";
 import SessionsPage from "./page";
-import { RepositoryHomeProvider, useRepositoryHome } from "@/hooks/use-repository-home";
+import { RepositoryHomeProvider } from "@/hooks/use-repository-home";
+import { useRepositoryHomeRouter } from "@/components/repository-home-navigation";
 import { SessionDiscoveryResults } from "@/components/session-discovery-results";
 
 expect.extend(matchers);
 
-const { mockReplace, mockUseSessionDiscovery, mockSearchParamsState, mockPermissions } = vi.hoisted(
-  () => ({
+const { mockPush, mockReplace, mockUseSessionDiscovery, mockSearchParamsState, mockPermissions } =
+  vi.hoisted(() => ({
+    mockPush: vi.fn(),
     mockReplace: vi.fn(),
     mockUseSessionDiscovery: vi.fn(),
     mockSearchParamsState: { value: new URLSearchParams() },
     mockPermissions: new Set<string>(),
-  })
-);
+  }));
 
 const teamMocks = vi.hoisted(() => ({
   activeTeamId: "all-my-teams" as string | null,
@@ -84,7 +85,7 @@ vi.mock("@/hooks/use-active-team", async (importOriginal) => {
 });
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ replace: mockReplace }),
+  useRouter: () => ({ replace: mockReplace, push: mockPush }),
   useSearchParams: () => mockSearchParamsState.value,
 }));
 
@@ -228,6 +229,7 @@ beforeAll(() => {
 describe("SessionsPage", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    mockPush.mockReset();
     mockReplace.mockReset();
     mockSearchParamsState.value = new URLSearchParams();
     mockPermissions.clear();
@@ -310,8 +312,9 @@ describe("SessionsPage", () => {
       expect(url.searchParams.get("homeRepo")).toBe("group/subgroup/site");
       // Follow the result URL into the same home context used by the session shell.
       mockSearchParamsState.value = url.searchParams;
-      const scope = renderHook(useRepositoryHome, { wrapper: RepositoryHomeProvider });
-      expect(scope.result.current.scopedHref("/")).toBe("/?homeRepo=group%2Fsubgroup%2Fsite");
+      const scope = renderHook(useRepositoryHomeRouter, { wrapper: RepositoryHomeProvider });
+      scope.result.current.push("/");
+      expect(mockPush).toHaveBeenLastCalledWith("/?homeRepo=group%2Fsubgroup%2Fsite");
       scope.unmount();
     }
     expect(

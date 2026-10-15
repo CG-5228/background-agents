@@ -1,9 +1,12 @@
 "use client";
 
-import { repositoryHomeHref, useRepositoryHome } from "@/hooks/use-repository-home";
+import { useRepositoryHome } from "@/hooks/use-repository-home";
+import {
+  repositoryHomeHref,
+  useRepositoryHomeRouter,
+} from "@/components/repository-home-navigation";
 import { useAuthSession } from "@/lib/auth-session";
 import { toast } from "sonner";
-import { useRouter } from "next/navigation";
 import { mutate } from "swr";
 import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
@@ -98,8 +101,8 @@ export default function Home() {
   const { data: session } = useAuthSession();
   const { hasPermission } = useCurrentUserAuthorization();
   const canCreateSession = hasPermission("sessions.create");
-  const router = useRouter();
-  const { repoFullName, scopedHref } = useRepositoryHome();
+  const router = useRepositoryHomeRouter();
+  const { repoFullName } = useRepositoryHome();
   const teamContext = useActiveTeam();
   const { teams, requireTeamOnCreate, loading: loadingTeams, error: teamError } = teamContext;
   const [accessDraft, setAccessDraft] = useState<ComposerAccessDraft | null>(null);
@@ -238,7 +241,7 @@ export default function Home() {
           sessionAttachments.clearAttachments();
           mutate(isUnarchivedSessionListKey);
           mutate(isSessionInboxKey);
-          router.push(scopedHref(`/session/${sessionId}`));
+          router.push(`/session/${sessionId}`);
         },
         denied: toast.error,
       },

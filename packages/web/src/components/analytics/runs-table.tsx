@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { RepositoryHomeLink as Link } from "@/components/repository-home-navigation";
 import type { AnalyticsDashboardResponse, SessionRun } from "@open-inspect/shared/types/analytics";
 import {
   ANALYTICS_SOURCE_LABELS,

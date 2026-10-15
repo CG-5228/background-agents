@@ -1,6 +1,8 @@
 "use client";
 
-import { notFound, useRouter } from "next/navigation";
+import { useRepositoryHomeRouter } from "@/components/repository-home-navigation";
+
+import { notFound } from "next/navigation";
 import { mutate } from "swr";
 import useSWRMutation from "swr/mutation";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
@@ -621,7 +623,7 @@ function SessionContent({
  * Archive and unarchive actions for the current session.
  */
 function useSessionListActions(sessionId: string) {
-  const router = useRouter();
+  const router = useRepositoryHomeRouter();
 
   const handleArchive = useCallback(async () => {
     const didArchive = await archiveSession(sessionId);

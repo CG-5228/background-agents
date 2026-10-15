@@ -1,7 +1,6 @@
 "use client";
 
-import Link from "next/link";
-import { useRepositoryHome } from "@/hooks/use-repository-home";
+import { RepositoryHomeLink as Link } from "@/components/repository-home-navigation";
 import { Badge } from "@/components/ui/badge";
 import { BoxIcon } from "@/components/ui/icons";
 import { formatRelativeTime } from "@/lib/time";
@@ -36,7 +35,6 @@ function SessionDiscoveryRow({
   environmentName,
   currentUserId,
 }: SessionDiscoveryRowProps) {
-  const { repoFullName } = useRepositoryHome();
   const repositoryLabels = sessionRepositoryLabels(session);
   const inlineRepositories = repositoryLabels.slice(0, INLINE_REPOSITORY_LABELS);
   const hiddenRepositories = repositoryLabels.slice(INLINE_REPOSITORY_LABELS);
@@ -46,7 +44,7 @@ function SessionDiscoveryRow({
   return (
     <li>
       <Link
-        href={buildSessionHref(session, repoFullName)}
+        href={buildSessionHref(session)}
         className="block px-4 py-3 transition hover:bg-muted focus-visible:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40"
       >
         <div className="flex items-start justify-between gap-3">

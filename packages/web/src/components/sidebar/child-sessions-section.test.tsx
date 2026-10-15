@@ -6,10 +6,14 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { SWRConfig } from "swr";
+import { RepositoryHomeProvider } from "@/hooks/use-repository-home";
 import { ChildSessionsSection } from "./child-sessions-section";
 import type { ChildSessionSummary } from "@open-inspect/shared/types/sessions";
 
 expect.extend(matchers);
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => new URLSearchParams("homeRepo=group%2Fsubgroup%2Fsite"),
+}));
 
 afterEach(cleanup);
 
@@ -55,6 +59,25 @@ function childSession(
 }
 
 describe("ChildSessionsSection", () => {
+  it("preserves repository-home scope when opening an inspector child", async () => {
+    render(
+      <RepositoryHomeProvider>
+        <SWRConfig
+          value={{
+            provider: () => new Map(),
+            fetcher: async () => ({ children: [childSession("child", "parent")] }),
+          }}
+        >
+          <ChildSessionsSection sessionId="parent" />
+        </SWRConfig>
+      </RepositoryHomeProvider>
+    );
+    expect(await screen.findByRole("link", { name: /Child session/ })).toHaveAttribute(
+      "href",
+      "/session/child?homeRepo=group%2Fsubgroup%2Fsite"
+    );
+  });
+
   it("rejects malformed child summaries at the web boundary", async () => {
     const onError = vi.fn();
     render(
