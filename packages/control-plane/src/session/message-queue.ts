@@ -204,7 +204,7 @@ export class SessionMessageQueue {
   }
 
   async processMessageQueue(): Promise<void> {
-    if (!this.sandboxLifecycle.mayProcessQueuedWork()) return;
+    if (!this.sandboxLifecycle.allowsQueueProcessing()) return;
     const currentSession = this.repository.getSession();
     if (!currentSession || !isSessionPromptable(currentSession.status)) {
       return;
@@ -250,7 +250,7 @@ export class SessionMessageQueue {
     const authenticationError =
       harnessIncompatibility?.message ??
       (await this.policy.getProviderAuthenticationError(resolvedModel));
-    if (!this.sandboxLifecycle.mayProcessQueuedWork()) return;
+    if (!this.sandboxLifecycle.allowsQueueProcessing()) return;
     if (this.repository.getSession()?.budget_exhausted === 1) return;
     if (authenticationError) {
       this.log.error("provider_auth.unavailable", {
@@ -368,7 +368,7 @@ export class SessionMessageQueue {
       ),
     };
 
-    if (!this.sandboxLifecycle.mayProcessQueuedWork()) return;
+    if (!this.sandboxLifecycle.allowsQueueProcessing()) return;
     const claimed = this.messageRepository.startMessageProcessing(
       message.id,
       now,

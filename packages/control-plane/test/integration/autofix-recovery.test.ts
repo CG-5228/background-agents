@@ -251,7 +251,7 @@ describe("Autofix feedback across sandbox recovery", () => {
       await runInSessionDO(stub, async (instance, state) => {
         const h = recoveryHarness(instance, state, { phase }, true);
         expect(h.shutdown.read()).toMatchObject({ phase, restoreInvoked: true });
-        expect(h.lifecycleManager.mayProcessQueuedWork()).toBe(false);
+        expect(h.lifecycleManager.allowsQueueProcessing()).toBe(false);
         expect(h.shutdown.read()).toMatchObject({ phase: "unknown", restoreInvoked: true });
         expect(h.rows()).toEqual([{ id: "queued-user", status: "pending" }]);
 

@@ -222,7 +222,7 @@ function buildQueue(
     reconcileAfterQueueRemoval: vi.fn(async () => {}),
   };
   const sandboxLifecycle = {
-    mayProcessQueuedWork: mayDispatch,
+    allowsQueueProcessing: mayDispatch,
     spawnSandbox: vi.fn(async () => {}),
     updateLastActivity: vi.fn((_timestamp: number) => {}),
     onPromptDispatched: vi.fn(() => {}),
