@@ -28,7 +28,10 @@ export class ProviderAccountUsageService {
     private readonly now: () => number = Date.now
   ) {}
 
-  async read(account: ModelProviderAccount): Promise<ProviderAccountUsage> {
+  async read(
+    account: ModelProviderAccount,
+    lifecycleVersion: number
+  ): Promise<ProviderAccountUsage> {
     // Check before looking at cache: disabling/archiving must take effect immediately.
     if (providerAccountIneligibility(account, "active_use")) {
       return { status: "unavailable", reason: "inactive_account" };
@@ -38,7 +41,7 @@ export class ProviderAccountUsageService {
     const deadlineAt = this.now() + PROVIDER_ACCOUNT_USAGE_TIMEOUT_MS;
     try {
       return await withinProviderAccessDeadline(
-        this.readCached(account, controller.signal, deadlineAt),
+        this.readCached(account, lifecycleVersion, controller.signal, deadlineAt),
         deadlineAt
       );
     } catch (cause) {
@@ -56,11 +59,12 @@ export class ProviderAccountUsageService {
 
   private async readCached(
     account: ModelProviderAccount,
+    lifecycleVersion: number,
     signal: AbortSignal,
     deadlineAt: number
   ): Promise<ProviderAccountUsage> {
-    // Reconnect/lifecycle edits change updatedAt; account identities never share a cache entry.
-    const key = `provider-account-usage:v1:${account.id}:${account.updatedAt}`;
+    // Usage attribution changes updatedAt, while this revision only changes on lifecycle edits.
+    const key = `provider-account-usage:v2:${account.id}:${lifecycleVersion}`;
     const cached = cachedUsageSchema.safeParse(await this.cache.get(key, "json").catch(() => null));
     signal.throwIfAborted();
     if (cached.success && cached.data.expiresAt > this.now()) return cached.data.usage;

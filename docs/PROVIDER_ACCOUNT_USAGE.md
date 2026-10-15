@@ -40,11 +40,13 @@ existing broker contract. Responses use the existing bounded provider-body reade
 returned manually and rejected, so bearer credentials are never forwarded to a redirect target.
 
 Normalized observations and provider failures share the existing server cache under a dedicated
-namespace, keyed by account ID and account update revision. Entries are reused for at most
-`PROVIDER_ACCOUNT_USAGE_CACHE_MS`, and successful observations expire earlier at the next future
-window reset. Account eligibility is checked before cache access. Cache failures degrade to reads;
-the cache is best effort and does not provide a cross-isolate request lock. Checks are initiated by
-the user, not by background polling of every stored account.
+namespace, keyed by account ID and lifecycle version, which usage attribution does not change.
+Client cache keys include the account update revision, and each new explicit check reaches the
+server. Entries are reused for at most `PROVIDER_ACCOUNT_USAGE_CACHE_MS`, and successful
+observations expire earlier at the next future window reset. Account eligibility is checked before
+cache access. Cache failures degrade to reads; the cache is best effort and does not provide a
+cross-isolate request lock. Checks are initiated by the user, not by background polling of every
+stored account.
 
 When the host supplies the optional `EGRESS` fetch port, quota reads use it exclusively. This
 matches the optional transport shape in

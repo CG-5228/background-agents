@@ -88,7 +88,7 @@ export function ProviderAccountUsagePanel({ account }: { account: ModelProviderA
     error,
     isValidating,
     mutate,
-  } = useProviderAccountUsage(account.id, requested && active && supported);
+  } = useProviderAccountUsage(account.id, account.updatedAt, requested && active && supported);
   return (
     <section
       aria-label={`Usage for ${account.displayName}`}

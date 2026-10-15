@@ -66,6 +66,76 @@ afterEach(() => {
 });
 
 describe("provider account quota display", () => {
+  it("checks the current connection after a reconnect within the deduplication interval", async () => {
+    const cache = new Map();
+    const panel = (revision: number) => (
+      <SWRConfig value={{ provider: () => cache }}>
+        <ProviderAccountUsagePanel key={revision} account={{ ...account, updatedAt: revision }} />
+      </SWRConfig>
+    );
+    const view = render(panel(1));
+    fireEvent.click(screen.getByRole("button", { name: "Check usage" }));
+    expect(await screen.findByText("25% used · 75% remaining")).toBeTruthy();
+
+    vi.mocked(browserApiFetch).mockImplementation(async () =>
+      Response.json({ usage: { ...usage, windows: [{ ...usage.windows[0], usedPercent: 5 }] } })
+    );
+    view.rerender(panel(2));
+    expect(screen.queryByText("25% used · 75% remaining")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Check usage" }));
+    expect(screen.queryByText("25% used · 75% remaining")).toBeNull();
+    expect(await screen.findByText("5% used · 95% remaining")).toBeTruthy();
+    expect(browserApiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("fetches after a reset when a newly opened panel checks within the deduplication interval", async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const cache = new Map();
+    const panel = (visible: boolean) => (
+      <SWRConfig value={{ provider: () => cache }}>
+        {visible && <ProviderAccountUsagePanel account={account} />}
+      </SWRConfig>
+    );
+    vi.mocked(browserApiFetch).mockImplementation(async () =>
+      Response.json({
+        usage: {
+          ...usage,
+          collectedAt: now,
+          expiresAt: now + 1000,
+          windows: [{ ...usage.windows[0], resetsAt: now + 1000 }],
+        },
+      })
+    );
+    const view = render(panel(true));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check usage" }));
+    });
+    expect(screen.getByText("25% used · 75% remaining")).toBeTruthy();
+    view.rerender(panel(false));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1001);
+    });
+    vi.mocked(browserApiFetch).mockImplementation(async () =>
+      Response.json({
+        usage: {
+          ...usage,
+          collectedAt: Date.now(),
+          expiresAt: Date.now() + 60_000,
+          windows: [{ ...usage.windows[0], usedPercent: 0 }],
+        },
+      })
+    );
+    view.rerender(panel(true));
+    expect(browserApiFetch).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check usage" }));
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(browserApiFetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("0% used · 100% remaining")).toBeTruthy();
+  });
+
   it("marks an open snapshot expired at its reset/cache deadline", async () => {
     vi.useFakeTimers();
     const now = Date.now();

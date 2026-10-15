@@ -60,7 +60,7 @@ describe("provider usage service", () => {
 
   it("uses the selected account broker and protocol headers; caches only sanitized data", async () => {
     const { service, broker, client, cache, values } = setup();
-    const usage = await service.read(account);
+    const usage = await service.read(account, 1);
     expect(usage.status).toBe("available");
     expect(broker.getAccess).toHaveBeenCalledWith(account.id, "openai", {
       deadlineAt: Date.now() + PROVIDER_ACCOUNT_USAGE_TIMEOUT_MS,
@@ -76,7 +76,7 @@ describe("provider usage service", () => {
       })
     );
     expect(JSON.stringify([...values.values()])).not.toMatch(/token-|acct-|plan_type/);
-    expect(await service.read(account)).toEqual(usage);
+    expect(await service.read(account, 1)).toEqual(usage);
     expect(broker.getAccess).toHaveBeenCalledTimes(1);
     expect(cache.put).toHaveBeenCalledTimes(1);
   });
@@ -93,10 +93,10 @@ describe("provider usage service", () => {
           },
         })
       );
-    await service.read(account);
+    await service.read(account, 1);
     const second = { ...account, id: "2".repeat(32) };
-    expect(await service.read(second)).toMatchObject({ windows: [{ usedPercent: 7 }] });
-    await service.read({ ...account, updatedAt: 2 });
+    expect(await service.read(second, 1)).toMatchObject({ windows: [{ usedPercent: 7 }] });
+    await service.read({ ...account, updatedAt: 2 }, 2);
     expect(broker.getAccess.mock.calls.map(([id]) => id)).toEqual([
       account.id,
       second.id,
@@ -108,8 +108,8 @@ describe("provider usage service", () => {
     "checks %s lifecycle before cached results",
     async (status) => {
       const { service, broker } = setup();
-      await service.read(account);
-      expect(await service.read({ ...account, status })).toEqual({
+      await service.read(account, 1);
+      expect(await service.read({ ...account, status }, 1)).toEqual({
         status: "unavailable",
         reason: "inactive_account",
       });
@@ -121,7 +121,7 @@ describe("provider usage service", () => {
     "does not access credentials or upstream for unsupported %s",
     async (provider) => {
       const { service, broker, cache, client } = setup();
-      expect(await service.read({ ...account, provider })).toEqual({ status: "unsupported" });
+      expect(await service.read({ ...account, provider }, 1)).toEqual({ status: "unsupported" });
       expect(broker.getAccess).not.toHaveBeenCalled();
       expect(client.fetch).not.toHaveBeenCalled();
       expect(cache.get).not.toHaveBeenCalled();
@@ -138,28 +138,28 @@ describe("provider usage service", () => {
         },
       })
     );
-    await service.read(account);
+    await service.read(account, 1);
     await vi.advanceTimersByTimeAsync(1001);
-    await service.read(account);
+    await service.read(account, 1);
     expect(client.fetch).toHaveBeenCalledTimes(2);
   });
 
   it("expires cached observations after the cache interval", async () => {
     const { service, client } = setup();
-    await service.read(account);
+    await service.read(account, 1);
     await vi.advanceTimersByTimeAsync(60_001);
-    await service.read(account);
+    await service.read(account, 1);
     expect(client.fetch).toHaveBeenCalledTimes(2);
   });
 
   it.each([302, 403, 429, 500])("sanitizes and caches provider failure %s", async (status) => {
     const { service, client } = setup();
     client.fetch.mockImplementation(async () => new Response("provider-secret", { status }));
-    expect(await service.read(account)).toEqual({
+    expect(await service.read(account, 1)).toEqual({
       status: "unavailable",
       reason: "provider_error",
     });
-    await service.read(account);
+    await service.read(account, 1);
     expect(client.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -168,7 +168,10 @@ describe("provider usage service", () => {
     broker.getAccess.mockRejectedValue(
       new ModelProviderAccountBrokerError("reconnect_required", "secret")
     );
-    expect(await service.read(account)).toEqual({ status: "unavailable", reason: "credentials" });
+    expect(await service.read(account, 1)).toEqual({
+      status: "unavailable",
+      reason: "credentials",
+    });
     expect(client.fetch).not.toHaveBeenCalled();
     expect(broker.getAccess).toHaveBeenCalledTimes(1);
   });
@@ -185,7 +188,7 @@ describe("provider usage service", () => {
           async () => new Response(new ReadableStream({ start() {} }))
         );
       if (stage === "cache") vi.mocked(cache.get).mockImplementation(stalled);
-      const reading = service.read(account);
+      const reading = service.read(account, 1);
       await vi.advanceTimersByTimeAsync(PROVIDER_ACCOUNT_USAGE_TIMEOUT_MS);
       expect(await reading).toEqual({ status: "unavailable", reason: "timeout" });
     }
@@ -196,7 +199,7 @@ describe("provider usage service", () => {
     async (body) => {
       const { service, client } = setup();
       client.fetch.mockImplementation(async () => new Response(body));
-      const usage = await service.read(account);
+      const usage = await service.read(account, 1);
       expect(usage).toMatchObject({ status: "unavailable" });
       expect(JSON.stringify(usage)).not.toContain(body);
     }
@@ -206,6 +209,6 @@ describe("provider usage service", () => {
     const { service, cache } = setup();
     vi.mocked(cache.get).mockRejectedValue(new Error("cache unavailable"));
     vi.mocked(cache.put).mockRejectedValue(new Error("cache unavailable"));
-    expect(await service.read(account)).toMatchObject({ status: "available" });
+    expect(await service.read(account, 1)).toMatchObject({ status: "available" });
   });
 });

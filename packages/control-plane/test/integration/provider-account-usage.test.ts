@@ -2,6 +2,8 @@ import { SELF, env, createExecutionContext } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanD1Tables } from "./cleanup";
 import { routeRequest, serviceFetch, serviceRequestHeaders } from "./helpers";
+import { ModelProviderAccountStore } from "../../src/db/model-provider-accounts";
+import usageFixture from "../fixtures/provider-usage/openai.json";
 
 describe("provider account usage", () => {
   beforeEach(cleanD1Tables);
@@ -42,6 +44,78 @@ describe("provider account usage", () => {
     const denied = await serviceFetch(url, { service: "linear-bot" });
     expect(denied.status).toBe(403);
     expect(denied.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("reuses usage after last-used writes and invalidates it on reconnect", async () => {
+    const created = await serviceFetch("https://test.local/model-provider-accounts", {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "openai",
+        displayName: "Cached ChatGPT",
+        refreshToken: "integration-openai-refresh",
+        accountId: "acct-integration",
+      }),
+    });
+    expect(created.status).toBe(201);
+    const { account } = await created.json<{ account: { id: string } }>();
+    await env.DB.prepare("UPDATE model_provider_accounts SET updated_at = 1 WHERE id = ?")
+      .bind(account.id)
+      .run();
+    const store = new ModelProviderAccountStore(env.DB);
+    const before = await store.getLifecycleSnapshot(account.id);
+    const url = `https://test.local/model-provider-accounts/${account.id}/usage`;
+    let calls = 0;
+    const bindings = {
+      ...env,
+      EGRESS: {
+        async fetch(input: RequestInfo | URL, init?: RequestInit) {
+          expect(String(input)).toBe("https://chatgpt.com/backend-api/wham/usage");
+          expect(new Headers(init?.headers).get("ChatGPT-Account-Id")).toBe("acct-integration");
+          calls++;
+          return Response.json({
+            ...usageFixture,
+            rate_limit: {
+              ...usageFixture.rate_limit,
+              primary_window: {
+                ...usageFixture.rate_limit.primary_window,
+                used_percent: calls * 10,
+              },
+            },
+          });
+        },
+      } as Fetcher,
+    };
+    const read = async () => {
+      const response = await routeRequest(
+        new Request(url, { headers: await serviceRequestHeaders(url) }),
+        bindings,
+        createExecutionContext()
+      );
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    const first = await read();
+    const after = await store.getLifecycleSnapshot(account.id);
+    expect(after!.account.lastUsedAt).not.toBeNull();
+    expect(after!.account.updatedAt).toBeGreaterThan(before!.account.updatedAt);
+    expect(after!.lifecycleVersion).toBe(before!.lifecycleVersion);
+    expect(await read()).toEqual(first);
+    expect(calls).toBe(1);
+
+    const reconnected = await serviceFetch(
+      `https://test.local/model-provider-accounts/${account.id}/reconnect`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "openai",
+          refreshToken: "integration-openai-reconnected",
+          accountId: "acct-integration",
+        }),
+      }
+    );
+    expect(reconnected.status).toBe(200);
+    expect(await read()).toMatchObject({ usage: { windows: [{ usedPercent: 20 }] } });
+    expect(calls).toBe(2);
   });
 
   it("uses configured egress exclusively and never bypasses its failure", async () => {

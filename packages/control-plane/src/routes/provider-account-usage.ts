@@ -23,8 +23,10 @@ providerAccountUsageRoutes.get(
       if (!MODEL_PROVIDER_ACCOUNT_ID_PATTERN.test(params.id))
         return error("Provider account not found", 404);
       const accounts = new ModelProviderAccountStore(ctx.db);
-      const account = await accounts.getById(params.id);
-      if (!account || account.archivedAt !== null) return error("Provider account not found", 404);
+      const snapshot = await accounts.getLifecycleSnapshot(params.id);
+      if (!snapshot || snapshot.account.archivedAt !== null)
+        return error("Provider account not found", 404);
+      const { account, lifecycleVersion } = snapshot;
       const broker = new ModelProviderAccountBroker(
         {
           accounts,
@@ -41,6 +43,6 @@ providerAccountUsageRoutes.get(
         env.REPOS_CACHE,
         env.EGRESS ?? { fetch: (input, init) => fetch(input, init) }
       );
-      return json({ usage: await service.read(account) });
+      return json({ usage: await service.read(account, lifecycleVersion) });
     })
 );
