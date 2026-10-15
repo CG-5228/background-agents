@@ -111,6 +111,69 @@ describe("provider generation races (real SQLite and encryption)", () => {
   afterEach(() => vi.restoreAllMocks());
 
   describe.each(["spawn", "restore"] as const)("%s", (kind) => {
+    it.each(["codeServer", "vnc", "ttyd", "tunnelUrls"] as const)(
+      "preserves bridge-reconciled access when foreground returns only %s",
+      async (field) => {
+        const f = fixture(kind);
+        const spawning = f.manager.spawnSandbox();
+        try {
+          await vi.waitFor(() => expect(f.launch).toHaveBeenCalledOnce());
+          const row = f.storage.getSandbox()!;
+          const generation = { sandboxId: row.modal_sandbox_id, createdAt: row.created_at };
+          f.manager.onSandboxSocketAttached(generation);
+          // VM reconciliation uses this same generation-scoped repository commit.
+          await expect(
+            f.storage.commitProviderAccess(generation, {
+              providerObjectId: "provider-A",
+              codeServer: { url: "https://bridge-code.test", password: "bridge-code-secret" },
+              vnc: { url: "https://bridge-vnc.test", password: "bridge-vnc-secret" },
+              ttyd: { url: "https://bridge-terminal.test", token: "bridge-terminal-token" },
+              tunnelUrls: { "8080": "https://bridge-preview.test" },
+            })
+          ).resolves.toBe(true);
+          const bridge = f.storage.getSandbox()!;
+          const full = f.result();
+          const partial: CreateSandboxResult = {
+            sandboxId: full.sandboxId,
+            providerObjectId: full.providerObjectId,
+            createdAt: full.createdAt,
+            lifetime: full.lifetime,
+            ...(field === "codeServer"
+              ? { codeServerUrl: full.codeServerUrl, codeServerPassword: full.codeServerPassword }
+              : {}),
+            ...(field === "vnc" ? { vncAccess: full.vncAccess } : {}),
+            ...(field === "ttyd" ? { ttydUrl: full.ttydUrl } : {}),
+            ...(field === "tunnelUrls" ? { tunnelUrls: full.tunnelUrls } : {}),
+          };
+          f.created.resolve(partial);
+          await spawning;
+          const current = f.storage.getSandbox()!;
+          const columns = {
+            codeServer: ["code_server_url", "code_server_password"],
+            vnc: ["vnc_url", "vnc_password"],
+            ttyd: ["ttyd_url", "ttyd_token"],
+            tunnelUrls: ["tunnel_urls"],
+          } as const;
+          for (const [kind, names] of Object.entries(columns)) {
+            for (const column of names) {
+              if (kind === field) expect(current[column]).not.toEqual(bridge[column]);
+              else expect(current[column]).toEqual(bridge[column]);
+            }
+          }
+          await expect(f.storage.getSandboxAccessSecret("codeServer")).resolves.toBe(
+            field === "codeServer" ? full.codeServerPassword : "bridge-code-secret"
+          );
+          await expect(f.storage.getSandboxAccessSecret("vnc")).resolves.toBe(
+            field === "vnc" ? full.vncAccess!.password : "bridge-vnc-secret"
+          );
+        } finally {
+          f.created.resolve(f.result());
+          await spawning;
+          f.db.close();
+        }
+      }
+    );
+
     it.each([false, true])(
       "does not publish old access after replacement during encryption (same id=%s)",
       async (sameId) => {

@@ -2161,12 +2161,6 @@ export class SandboxLifecycleManager
     sandboxAuthToken: string,
     sessionId: string
   ): Promise<boolean> {
-    // Bridge-driven VM resolution already persisted access and returns only the handle.
-    if (!result.codeServerUrl && !result.vncAccess && !result.tunnelUrls && !result.ttydUrl) {
-      if (!this.isCurrentGeneration(generation)) return false;
-      this.access.broadcastProviderAccessIfConnected();
-      return true;
-    }
     const token = result.ttydUrl
       ? await this.access.mintTtydToken(sandboxAuthToken, sessionId, generation.sandboxId!)
       : null;
@@ -2177,10 +2171,13 @@ export class SandboxLifecycleManager
         codeServer:
           result.codeServerUrl && result.codeServerPassword
             ? { url: result.codeServerUrl, password: result.codeServerPassword }
-            : null,
-        vnc: result.vncAccess ?? null,
-        ttyd: result.ttydUrl && token ? { url: result.ttydUrl, token } : null,
-        tunnelUrls: result.tunnelUrls ?? null,
+            : undefined,
+        vnc: result.vncAccess,
+        ttyd: result.ttydUrl && token ? { url: result.ttydUrl, token } : undefined,
+        tunnelUrls:
+          result.tunnelUrls && Object.keys(result.tunnelUrls).length > 0
+            ? result.tunnelUrls
+            : undefined,
       },
       undefined,
       !this.canStopProviderSandbox()

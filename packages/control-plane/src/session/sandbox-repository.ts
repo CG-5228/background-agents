@@ -77,13 +77,13 @@ export interface ResumeSandboxData {
   createdAt: number;
 }
 
-/** Provider access discovered during create, restore, resume or reconciliation. */
+/** Provider access: omitted artifacts are preserved; explicit null clears an artifact. */
 export interface ProviderAccessData {
   providerObjectId: string | null;
-  codeServer: { url: string; password: string } | null;
-  vnc: { url: string; password: string } | null;
-  ttyd: { url: string | null; token: string } | null;
-  tunnelUrls: Record<string, string> | null;
+  codeServer?: { url: string; password: string } | null;
+  vnc?: { url: string; password: string } | null;
+  ttyd?: { url: string | null; token: string } | null;
+  tunnelUrls?: Record<string, string> | null;
 }
 
 /**
@@ -392,29 +392,32 @@ export class SandboxRepository {
       access.vnc ? this.encrypt(access.vnc.password) : null,
       access.ttyd ? this.encrypt(access.ttyd.token) : null,
     ]);
+    const assignments = ["modal_object_id = COALESCE(?, modal_object_id)"];
+    const values: (string | null)[] = [access.providerObjectId];
+    if (access.codeServer !== undefined) {
+      assignments.push("code_server_url = ?, code_server_password = ?");
+      values.push(access.codeServer?.url ?? null, codeServerPassword);
+    }
+    if (access.vnc !== undefined) {
+      assignments.push("vnc_url = ?, vnc_password = ?");
+      values.push(access.vnc?.url ?? null, vncPassword);
+    }
+    if (access.ttyd !== undefined) {
+      assignments.push("ttyd_url = ?, ttyd_token = ?");
+      values.push(access.ttyd?.url ?? null, ttydToken);
+    }
+    if (access.tunnelUrls !== undefined) {
+      assignments.push("tunnel_urls = ?");
+      values.push(access.tunnelUrls ? JSON.stringify(access.tunnelUrls) : null);
+    }
     const result = this.sql.exec(
-      `UPDATE sandbox SET
-         modal_object_id = COALESCE(?, modal_object_id),
-         code_server_url = ?,
-         code_server_password = ?,
-         vnc_url = ?,
-         vnc_password = ?,
-         ttyd_url = ?,
-         ttyd_token = ?,
-         tunnel_urls = ?
+      `UPDATE sandbox SET ${assignments.join(", ")}
        WHERE id = (SELECT id FROM sandbox LIMIT 1)
          AND modal_sandbox_id IS ? AND created_at = ?
           AND (status IN ('connecting', 'ready') OR (? IS NOT NULL AND status = 'spawning')
                OR (? = 1 AND status = 'failed'))
           AND fenced = 0 AND (? IS NULL OR modal_object_id = ?)`,
-      access.providerObjectId,
-      access.codeServer?.url ?? null,
-      codeServerPassword,
-      access.vnc?.url ?? null,
-      vncPassword,
-      access.ttyd?.url ?? null,
-      ttydToken,
-      access.tunnelUrls ? JSON.stringify(access.tunnelUrls) : null,
+      ...values,
       generation.sandboxId,
       generation.createdAt,
       expectedProviderObjectId ?? null,

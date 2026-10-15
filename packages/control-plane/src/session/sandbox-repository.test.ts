@@ -153,6 +153,78 @@ describe("SandboxRepository commitProviderAccess (SQLite)", () => {
       }
     }
   );
+  it("preserves omitted access at commit time after encryption yields", async () => {
+    const { db, repository, set } = createSqliteRepository();
+    let releaseEncryption!: () => void;
+    const gate = new Promise<void>((resolve) => (releaseEncryption = resolve));
+    let beganEncryption!: () => void;
+    const encrypting = new Promise<void>((resolve) => (beganEncryption = resolve));
+    const encrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+    let spy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await repository.commitProviderAccess(generation, access);
+      const bridge = repository.getSandbox()!;
+      spy = vi.spyOn(crypto.subtle, "encrypt").mockImplementation(async (...args) => {
+        const encrypted = await encrypt(...args);
+        beganEncryption();
+        await gate;
+        return encrypted;
+      });
+      const completion = repository.commitProviderAccess(generation, {
+        providerObjectId: null,
+        ttyd: { url: "https://foreground-terminal.test", token: "foreground-token" },
+      });
+      await encrypting;
+      set(
+        "code_server_url = ?, tunnel_urls = ?",
+        "https://latest-code.test",
+        '{"8080":"https://latest-preview.test"}'
+      );
+      releaseEncryption();
+      await expect(completion).resolves.toBe(true);
+      expect(repository.getSandbox()).toMatchObject({
+        code_server_url: "https://latest-code.test",
+        code_server_password: bridge.code_server_password,
+        vnc_url: bridge.vnc_url,
+        vnc_password: bridge.vnc_password,
+        tunnel_urls: '{"8080":"https://latest-preview.test"}',
+        ttyd_url: "https://foreground-terminal.test",
+      });
+      await expect(repository.getSandboxAccessSecret("ttyd")).resolves.toBe("foreground-token");
+    } finally {
+      releaseEncryption();
+      spy?.mockRestore();
+      db.close();
+    }
+  });
+
+  it("still clears explicit null access returned by resume", async () => {
+    const { db, repository } = createSqliteRepository();
+    try {
+      await repository.commitProviderAccess(generation, access);
+      await expect(
+        repository.commitProviderAccess(generation, {
+          providerObjectId: null,
+          codeServer: null,
+          vnc: null,
+          ttyd: null,
+          tunnelUrls: null,
+        })
+      ).resolves.toBe(true);
+      expect(repository.getSandbox()).toMatchObject({
+        code_server_url: null,
+        code_server_password: null,
+        vnc_url: null,
+        vnc_password: null,
+        ttyd_url: null,
+        ttyd_token: null,
+        tunnel_urls: null,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it("retains the accepted cleanup handle when a provider omits it from access", async () => {
     const { db, repository } = createSqliteRepository();
     try {

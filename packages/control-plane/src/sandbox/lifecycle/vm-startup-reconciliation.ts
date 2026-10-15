@@ -43,10 +43,10 @@ export interface VmStartupReconciliationStorage {
     generation: SandboxGeneration,
     access: {
       providerObjectId: string | null;
-      codeServer: { url: string; password: string } | null;
-      vnc: { url: string; password: string } | null;
-      ttyd: { url: string | null; token: string } | null;
-      tunnelUrls: Record<string, string> | null;
+      codeServer?: { url: string; password: string } | null;
+      vnc?: { url: string; password: string } | null;
+      ttyd?: { url: string | null; token: string } | null;
+      tunnelUrls?: Record<string, string> | null;
     },
     expectedProviderObjectId?: string,
     allowFailedSelfHeal?: boolean
