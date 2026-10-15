@@ -41,7 +41,8 @@ providerAccountUsageRoutes.get(
       const service = new ProviderAccountUsageService(
         broker,
         env.REPOS_CACHE,
-        env.EGRESS ?? { fetch: (input, init) => fetch(input, init) }
+        env.EGRESS ?? { fetch: (input, init) => fetch(input, init) },
+        ctx.executionCtx
       );
       return json({ usage: await service.read(account, lifecycleVersion) });
     })

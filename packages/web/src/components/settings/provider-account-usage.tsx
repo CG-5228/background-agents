@@ -80,15 +80,10 @@ function UsageSnapshot({
 }
 
 export function ProviderAccountUsagePanel({ account }: { account: ModelProviderAccount }) {
-  const [requested, setRequested] = useState(false);
   const active = account.status === "active" && account.archivedAt === null;
   const supported = account.provider === "openai";
-  const {
-    data: usage,
-    error,
-    isValidating,
-    mutate,
-  } = useProviderAccountUsage(account.id, account.updatedAt, requested && active && supported);
+  const { data, error, isMutating, trigger } = useProviderAccountUsage(account.id);
+  const usage = isMutating ? undefined : data;
   return (
     <section
       aria-label={`Usage for ${account.displayName}`}
@@ -97,16 +92,8 @@ export function ProviderAccountUsagePanel({ account }: { account: ModelProviderA
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-medium text-foreground">Usage limits</span>
         {active && supported && (
-          <Button
-            size="xs"
-            variant="subtle"
-            disabled={isValidating}
-            onClick={() => {
-              if (requested) void mutate();
-              else setRequested(true);
-            }}
-          >
-            {isValidating ? "Checking usage…" : requested ? "Refresh usage" : "Check usage"}
+          <Button size="xs" variant="subtle" disabled={isMutating} onClick={() => void trigger()}>
+            {isMutating ? "Checking usage…" : data || error ? "Refresh usage" : "Check usage"}
           </Button>
         )}
       </div>
@@ -122,9 +109,7 @@ export function ProviderAccountUsagePanel({ account }: { account: ModelProviderA
         ) : usage?.status === "available" ? (
           <UsageSnapshot key={`${usage.collectedAt}:${usage.expiresAt}`} usage={usage} />
         ) : (
-          <p>
-            {isValidating ? "Loading usage…" : "Check the remaining allowance for this account."}
-          </p>
+          <p>{isMutating ? "Loading usage…" : "Check the remaining allowance for this account."}</p>
         )}
       </div>
     </section>

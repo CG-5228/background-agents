@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CacheStore } from "@open-inspect/shared/cache-store";
 import type { ModelProviderAccount } from "../db/model-provider-accounts";
-import { ModelProviderAccountBrokerError } from "../auth/model-provider-account-broker";
+import {
+  ModelProviderAccountBroker,
+  ModelProviderAccountBrokerError,
+  type ModelProviderAccountBrokerStores,
+} from "../auth/model-provider-account-broker";
+import { ModelProviderAccountAdapterRegistry } from "../auth/model-provider-account-adapters";
+import { OpenAIModelProviderAccountAdapter } from "../auth/model-provider-account-openai-adapter";
+import type { OpenAITokenResponse } from "../auth/openai";
+import { createTestBackgroundTasks } from "../background-tasks.test-support";
 import fixture from "../../test/fixtures/provider-usage/openai.json";
 import { ProviderAccountUsageService, PROVIDER_ACCOUNT_USAGE_TIMEOUT_MS } from "./usage-service";
 import { OPENAI_USAGE_URL } from "./openai-usage";
@@ -43,12 +51,14 @@ function setup() {
     })),
   };
   const client = { fetch: vi.fn(async () => Response.json(fixture)) };
+  const backgroundTasks = createTestBackgroundTasks();
   return {
     values,
     cache,
     broker,
     client,
-    service: new ProviderAccountUsageService(broker, cache, client),
+    backgroundTasks,
+    service: new ProviderAccountUsageService(broker, cache, client, backgroundTasks),
   };
 }
 describe("provider usage service", () => {
@@ -210,5 +220,89 @@ describe("provider usage service", () => {
     vi.mocked(cache.get).mockRejectedValue(new Error("cache unavailable"));
     vi.mocked(cache.put).mockRejectedValue(new Error("cache unavailable"));
     expect(await service.read(account, 1)).toMatchObject({ status: "available" });
+  });
+
+  it("returns an observed result even when cache persistence stalls", async () => {
+    const { service, cache } = setup();
+    vi.mocked(cache.put).mockImplementation(() => new Promise(() => {}));
+    const reading = service.read(account, 1);
+    await vi.advanceTimersByTimeAsync(PROVIDER_ACCOUNT_USAGE_TIMEOUT_MS);
+    expect(await reading).toMatchObject({ status: "available" });
+  });
+
+  it("retains real broker settlement and commits a rotated credential after the caller deadline", async () => {
+    const { cache, client, backgroundTasks } = setup();
+    let finishRefresh!: (tokens: OpenAITokenResponse) => void;
+    const refresh = vi.fn(
+      () =>
+        new Promise<OpenAITokenResponse>((resolve) => {
+          finishRefresh = resolve;
+        })
+    );
+    const stores: ModelProviderAccountBrokerStores = {
+      accounts: {
+        getById: vi.fn().mockResolvedValue(account),
+        touchLastUsed: vi.fn().mockResolvedValue(true),
+      },
+      credentials: {
+        readCredentialState: vi.fn().mockResolvedValue({
+          payload: { refreshToken: "old-refresh" },
+          credentialSchemaVersion: 1,
+          credentialVersion: 1,
+          exchangeGeneration: 0,
+          exchangeState: "idle",
+          exchangeOwner: null,
+          exchangeStartedAt: null,
+          accessTokenExpiresAt: null,
+          updatedAt: 1,
+        }),
+        tryBeginExchange: vi.fn().mockResolvedValue({ acquired: true, generation: 1 }),
+        completeExchange: vi.fn().mockResolvedValue(true),
+        clearSafeFailure: vi.fn().mockResolvedValue(true),
+      },
+      atomicWriter: { fenceExchangeAndRequireReconnect: vi.fn().mockResolvedValue(true) },
+    };
+    const broker = new ModelProviderAccountBroker(
+      stores,
+      new ModelProviderAccountAdapterRegistry([new OpenAIModelProviderAccountAdapter(refresh)])
+    );
+    const service = new ProviderAccountUsageService(broker, cache, client, backgroundTasks);
+    const reading = service.read(account, 1);
+    await vi.advanceTimersByTimeAsync(PROVIDER_ACCOUNT_USAGE_TIMEOUT_MS);
+    expect(refresh).toHaveBeenCalledWith("old-refresh");
+    expect(await reading).toEqual({ status: "unavailable", reason: "timeout" });
+    expect(stores.credentials.completeExchange).not.toHaveBeenCalled();
+    expect(backgroundTasks.submissions.map(({ name }) => name)).toContain(
+      "provider-usage-credential-settlement"
+    );
+    let settled = false;
+    void backgroundTasks.submissions[0].task!.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    finishRefresh({
+      access_token: "new-access",
+      refresh_token: "replacement-refresh",
+      expires_in: 3600,
+      id_token: `header.${btoa(JSON.stringify({ chatgpt_account_id: account.externalAccountId }))}.signature`,
+    });
+    await backgroundTasks.settle();
+    expect(settled).toBe(true);
+    expect(stores.credentials.completeExchange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerAccountId: account.id,
+        expectedCredentialVersion: 1,
+        exchangeGeneration: 1,
+        payload: expect.objectContaining({
+          refreshToken: "replacement-refresh",
+          accessToken: "new-access",
+        }),
+      })
+    );
+    expect(stores.atomicWriter.fenceExchangeAndRequireReconnect).not.toHaveBeenCalled();
+    expect(client.fetch).not.toHaveBeenCalled();
+    expect(backgroundTasks.failures).toEqual([]);
   });
 });

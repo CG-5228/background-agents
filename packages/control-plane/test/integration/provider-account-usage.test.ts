@@ -1,4 +1,4 @@
-import { SELF, env, createExecutionContext } from "cloudflare:test";
+import { SELF, env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanD1Tables } from "./cleanup";
 import { routeRequest, serviceFetch, serviceRequestHeaders } from "./helpers";
@@ -86,13 +86,16 @@ describe("provider account usage", () => {
       } as Fetcher,
     };
     const read = async () => {
+      const executionCtx = createExecutionContext();
       const response = await routeRequest(
         new Request(url, { headers: await serviceRequestHeaders(url) }),
         bindings,
-        createExecutionContext()
+        executionCtx
       );
       expect(response.status).toBe(200);
-      return response.json();
+      const body = await response.json();
+      await waitOnExecutionContext(executionCtx);
+      return body;
     };
     const first = await read();
     const after = await store.getLifecycleSnapshot(account.id);

@@ -548,10 +548,7 @@ export function ProviderAccountsSettings() {
                           </div>
                         )}
                       </div>
-                      <ProviderAccountUsagePanel
-                        key={`${account.id}:${account.updatedAt}`}
-                        account={account}
-                      />
+                      <ProviderAccountUsagePanel account={account} />
                       {account.status !== "active" && (
                         <p
                           className={`mt-3 rounded-md px-3 py-2 text-xs ${

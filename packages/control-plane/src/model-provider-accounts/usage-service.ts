@@ -12,7 +12,7 @@ import {
 } from "../auth/model-provider-account-broker";
 import { readBoundedProviderBody } from "../auth/provider-response";
 import type { ModelProviderAccount } from "../db/model-provider-accounts";
-import type { FetchClient } from "../platform-ports";
+import type { BackgroundTasks, FetchClient } from "../platform-ports";
 import { providerAccountIneligibility } from "./account-lifecycle-policy";
 import { OPENAI_USAGE_URL, parseOpenAIUsage } from "./openai-usage";
 
@@ -25,6 +25,7 @@ export class ProviderAccountUsageService {
     private readonly broker: Pick<ModelProviderAccountBroker, "getAccess">,
     private readonly cache: CacheStore,
     private readonly client: FetchClient,
+    private readonly backgroundTasks: BackgroundTasks,
     private readonly now: () => number = Date.now
   ) {}
 
@@ -70,7 +71,17 @@ export class ProviderAccountUsageService {
     if (cached.success && cached.data.expiresAt > this.now()) return cached.data.usage;
     let usage: ProviderAccountUsage;
     try {
-      const access = await this.broker.getAccess(account.id, "openai", { deadlineAt });
+      const operation = this.broker.getAccess(account.id, "openai", { deadlineAt });
+      // A consumed rotating grant must settle even after the caller stops waiting.
+      this.backgroundTasks.submit(
+        () =>
+          operation.then(
+            () => undefined,
+            () => undefined
+          ),
+        { name: "provider-usage-credential-settlement" }
+      );
+      const access = await operation;
       signal.throwIfAborted();
       const headers: Record<string, string> = {
         Authorization: `Bearer ${access.accessToken}`,
@@ -110,9 +121,13 @@ export class ProviderAccountUsageService {
     const expiresAt =
       usage.status === "available" ? usage.expiresAt : this.now() + PROVIDER_ACCOUNT_USAGE_CACHE_MS;
     // Only normalized, credential-free observations enter the cache. Cache outages remain readable.
-    await this.cache
-      .put(key, JSON.stringify({ usage, expiresAt }), { ttlMs: PROVIDER_ACCOUNT_USAGE_CACHE_MS })
-      .catch(() => undefined);
+    this.backgroundTasks.submit(
+      () =>
+        this.cache.put(key, JSON.stringify({ usage, expiresAt }), {
+          ttlMs: PROVIDER_ACCOUNT_USAGE_CACHE_MS,
+        }),
+      { name: "provider-account-usage-cache-write" }
+    );
     return usage;
   }
 }

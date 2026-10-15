@@ -33,20 +33,20 @@ protocol examples from official CLI source, not evidence that a deployed endpoin
 
 ## Bounds, cache, and transport
 
-`PROVIDER_ACCOUNT_USAGE_TIMEOUT_MS` bounds the cache lookup, broker wait, request, body read, and
-cache write as one operation. Fetches are aborted when the caller stops waiting. A broker that
-already consumed a rotating grant may finish its durable credential commit, as required by the
-existing broker contract. Responses use the existing bounded provider-body reader. Redirects are
-returned manually and rejected, so bearer credentials are never forwarded to a redirect target.
+`PROVIDER_ACCOUNT_USAGE_TIMEOUT_MS` bounds the cache lookup, broker wait, request, and body read as
+one operation. Fetches are aborted when the caller stops waiting. The underlying broker promise is
+retained through the background-task port so a consumed rotating grant can finish its durable
+credential commit after the caller deadline. Cache persistence also runs through that port, outside
+the observation's critical path. Responses use the existing bounded provider-body reader. Redirects
+are returned manually and rejected, so bearer credentials are never forwarded to a redirect target.
 
 Normalized observations and provider failures share the existing server cache under a dedicated
-namespace, keyed by account ID and lifecycle version, which usage attribution does not change.
-Client cache keys include the account update revision, and each new explicit check reaches the
-server. Entries are reused for at most `PROVIDER_ACCOUNT_USAGE_CACHE_MS`, and successful
-observations expire earlier at the next future window reset. Account eligibility is checked before
-cache access. Cache failures degrade to reads; the cache is best effort and does not provide a
-cross-isolate request lock. Checks are initiated by the user, not by background polling of every
-stored account.
+namespace, keyed by account ID and lifecycle version, which usage attribution does not change. Check
+and Refresh use the same explicit browser request; the server owns freshness. Entries are reused for
+at most `PROVIDER_ACCOUNT_USAGE_CACHE_MS`, and successful observations expire earlier at the next
+future window reset. Account eligibility is checked before cache access. Cache failures degrade to
+reads; the cache is best effort and does not provide a cross-isolate request lock. Checks are
+initiated by the user, not by background polling of every stored account.
 
 When the host supplies the optional `EGRESS` fetch port, quota reads use it exclusively. This
 matches the optional transport shape in
