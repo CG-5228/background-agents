@@ -145,12 +145,18 @@ export class SandboxLaunchContext {
   async lookupImageBuildForSpawn(
     scope: ImageBuildScope,
     repositories: SessionRepositoryInfo[],
-    harness: HarnessId
+    harness: HarnessId,
+    requiredRuntimeGeneration?: number
   ): Promise<SelectedImageBuild | null> {
     if (!this.imageBuildLookup || repositories.length === 0) return null;
     try {
       const image = await this.imageBuildLookup.getLatestReady(scope);
-      const result = await evaluateImageBuildForSpawn(image, repositories, harness);
+      const result = await evaluateImageBuildForSpawn(
+        image,
+        repositories,
+        harness,
+        requiredRuntimeGeneration
+      );
       if (result.outcome === "selected") {
         this.getLogger().info("Using prebuilt image", {
           event: "image_build.spawn_selected",

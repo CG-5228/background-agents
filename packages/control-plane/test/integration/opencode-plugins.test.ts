@@ -105,3 +105,28 @@ describe("Workspace OpenCode plugins", () => {
     expect((await serviceFetch(`${URL}/missing`, { method: "DELETE" })).status).toBe(403);
   });
 });
+
+it("audits successful plugin management without auditing catalog reads", async () => {
+  await cleanD1Tables();
+  const created = await create("audit@1.0.0");
+  expect(created.status).toBe(201);
+  const plugin = await created.json<OpencodePlugin>();
+  expect(
+    (
+      await serviceFetch(`${URL}/${plugin.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ spec: plugin.spec, enabled: false }),
+      })
+    ).status
+  ).toBe(200);
+  expect((await serviceFetch(`${URL}/${plugin.id}`, { method: "DELETE" })).status).toBe(200);
+  expect((await serviceFetch(URL)).status).toBe(200);
+  const { results } = await env.DB.prepare(
+    "SELECT metadata_json FROM authorization_audit_events WHERE action = 'authorization.request_allowed'"
+  ).all<{ metadata_json: string }>();
+  const metadata = results.map((row) => JSON.parse(row.metadata_json));
+  expect(metadata).toHaveLength(3);
+  expect(metadata.map((row) => row.httpMethod).sort()).toEqual(["DELETE", "POST", "PUT"]);
+  expect(metadata.every((row) => row.requiredPermission === "opencode_plugins.manage")).toBe(true);
+  expect(metadata.map((row) => row.httpStatus).sort()).toEqual([200, 200, 201]);
+});

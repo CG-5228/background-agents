@@ -6,7 +6,7 @@ import { admit, dispatch } from "../routing/admit";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import { parseBody } from "./body";
 import {
-  GITHUB_USER_OR_SERVICE_ROUTE,
+  SCM_AGNOSTIC_USER_OR_SERVICE_ROUTE,
   error,
   json,
   requirePermission,
@@ -14,11 +14,11 @@ import {
 } from "./shared";
 
 const read = admit({
-  ...GITHUB_USER_OR_SERVICE_ROUTE,
+  ...SCM_AGNOSTIC_USER_OR_SERVICE_ROUTE,
   authorization: requirePermission("opencode_plugins.read"),
 });
 const manage = admit({
-  ...GITHUB_USER_OR_SERVICE_ROUTE,
+  ...SCM_AGNOSTIC_USER_OR_SERVICE_ROUTE,
   authorization: requirePermission("opencode_plugins.manage"),
 });
 export const opencodePluginRoutes = new Hono<ControlPlaneHonoEnv>();

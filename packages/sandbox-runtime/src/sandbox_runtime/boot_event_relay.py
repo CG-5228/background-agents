@@ -46,6 +46,7 @@ class BootEventRelay:
         self._offset = 0
         self._partial = ""
         self.latest_phase: dict[str, Any] | None = None
+        self.latest_plugins: dict[str, Any] | None = None
         self.harness_completed = False
         # Highest sequence a bridge of this boot has already handed to the
         # control plane; lines at or below it inform state but are not relayed.
@@ -88,6 +89,7 @@ class BootEventRelay:
             self._offset = 0
             self._partial = ""
             self.latest_phase = None
+            self.latest_plugins = None
             self.harness_completed = False
             self.relayed_through = 0
             self.cursor_path.unlink(missing_ok=True)
@@ -114,6 +116,8 @@ class BootEventRelay:
                 continue
             if not isinstance(line, dict) or not isinstance(line.get("seq"), int):
                 continue
+            if line.get("kind") == "opencode_plugins":
+                self.latest_plugins = line
             if line.get("kind") == "phase":
                 self.latest_phase = line
                 if line.get("phase") == "harness" and line.get("status") == "completed":
@@ -129,6 +133,10 @@ class BootEventRelay:
             if event is not None:
                 return event
         return dict(STARTING_PHASE_EVENT)
+
+    def latest_plugin_event(self) -> dict[str, Any] | None:
+        """The current plugin snapshot, including lines consumed while disconnected."""
+        return self.to_event(self.latest_plugins) if self.latest_plugins is not None else None
 
     @staticmethod
     def to_event(line: dict[str, Any]) -> dict[str, Any] | None:

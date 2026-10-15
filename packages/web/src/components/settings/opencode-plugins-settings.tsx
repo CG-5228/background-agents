@@ -26,8 +26,10 @@ export function OpencodePluginsSettings() {
   const { plugins, loading, error, mutate } = useOpencodePlugins();
   const { hasPermission } = useCurrentUserAuthorization();
   const canManage = hasPermission("opencode_plugins.manage");
-  const { repos } = useRepos(canManage);
+  const canReadRepositories = hasPermission("repositories.read");
+  const { repos } = useRepos(canManage && canReadRepositories);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [repositoryScope, setRepositoryScope] = useState("");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const selectedRepositories = draft?.repoScopes ?? [];
@@ -163,7 +165,38 @@ export function OpencodePluginsSettings() {
                     {fullName}
                   </label>
                 ))}
-                {repos.length === 0 && draft.repoScopes.length === 0 && (
+                <div className="space-y-2">
+                  <Label htmlFor="plugin-repository-scope">Repository name</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="plugin-repository-scope"
+                      placeholder="owner/repository"
+                      value={repositoryScope}
+                      onChange={(event) => setRepositoryScope(event.target.value)}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        const scope = repositoryScope.trim().toLowerCase();
+                        const input = opencodePluginInputSchema.shape.repoScopes.safeParse([scope]);
+                        if (!input.success) {
+                          setFormError("Enter a repository as owner/repository");
+                          return;
+                        }
+                        setDraft({
+                          ...draft,
+                          repoScopes: [...new Set([...selectedRepositories, scope])],
+                        });
+                        setRepositoryScope("");
+                        setFormError(null);
+                      }}
+                    >
+                      Add repository
+                    </Button>
+                  </div>
+                </div>
+                {canReadRepositories && repos.length === 0 && draft.repoScopes.length === 0 && (
                   <p className="text-sm text-muted-foreground">No repositories available.</p>
                 )}
               </div>

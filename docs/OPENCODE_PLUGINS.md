@@ -9,7 +9,8 @@ immediately.
 
 Viewing the catalog requires `opencode_plugins.read`; mutations require `opencode_plugins.manage`.
 Owners and Administrators can manage plugins by default, while Members and Viewers can read the
-catalog. Only the OpenCode harness consumes this configuration; Claude and native Codex ignore it.
+catalog. Managers can enter repository names directly without repository-read permission. Only the
+OpenCode harness consumes this configuration; Claude and native Codex ignore it.
 
 Plugins are trusted executable code. They receive the session's credentials and network access. Only
 install packages you trust. Use the existing global, repository, environment, or team secrets for
@@ -32,18 +33,24 @@ OpenCode from initializing within `PLUGIN_INITIALIZATION_TIMEOUT_SECONDS` trigge
 the entire managed selection omitted. Per-repository plugins are outside this fallback.
 
 Skipped plugins produce session warnings. The session sidebar shows the latest boot's managed plugin
-list and its loading, loaded, or skipped status. “Loaded” means the registry initialized without a
-reported load error, not that all of a plugin's later hooks will succeed. Arbitrary plugin code can
-crash or block the process after startup; this is not a security or process isolation boundary.
+list and its loading, loaded, or skipped status. The supervisor event channel remains live after
+readiness; reconnecting bridges replay the latest plugin snapshot. “Loaded” means the registry
+initialized without a reported load error, not that all of a plugin's later hooks will succeed.
+Arbitrary plugin code can crash or block the process after startup; this is not a security or
+process isolation boundary.
 
 ## Deployment and limits
 
 Apply D1 migration `0089_opencode_plugins.sql`, deploy the control plane and web, and rebuild
-sandbox images with the updated runtime. Older images ignore the new launch field and cannot report
-plugin outcomes. Existing prebuilds are not invalidated by catalog edits; plugins install during
-boot and reuse completed cached installations where available. Image-prebuild installation is not
-part of this change. Direct versions are pinned; transitive dependencies follow npm's resolution and
-the cached lockfile, so independently rebuilt caches need not be bit-for-bit identical.
+sandbox images with the updated runtime. A matching plugin selection requires at least
+`minimumOpencodePluginsGeneration` from the runtime manifest. Older prebuilds are skipped in favor
+of the current base image. Restoring an older snapshot with matching plugins is held without
+replacing its saved state; disable the matching plugins or recover it using an upgraded runtime.
+Sessions without matching plugins keep their existing compatibility floor. Existing prebuilds are
+not invalidated by catalog edits; plugins install during boot and reuse completed cached
+installations where available. Image-prebuild installation is not part of this change. Direct
+versions are pinned; transitive dependencies follow npm's resolution and the cached lockfile, so
+independently rebuilt caches need not be bit-for-bit identical.
 
 The cache layout and load-error reporting are coupled to OpenCode 1.18.29 and covered by a
 real-binary test with synthetic local packages. Re-run that contract test when updating OpenCode. No

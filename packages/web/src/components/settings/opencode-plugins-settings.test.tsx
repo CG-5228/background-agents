@@ -6,13 +6,23 @@ import * as matchers from "@testing-library/jest-dom/matchers";
 import { OpencodePluginsSettings } from "./opencode-plugins-settings";
 
 expect.extend(matchers);
-const mocks = vi.hoisted(() => ({ save: vi.fn(), remove: vi.fn(), mutate: vi.fn(), manage: true }));
+const mocks = vi.hoisted(() => ({
+  save: vi.fn(),
+  remove: vi.fn(),
+  mutate: vi.fn(),
+  manage: true,
+  readRepositories: true,
+  useRepos: vi.fn(),
+}));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock("@/hooks/use-current-user-authorization", () => ({
-  useCurrentUserAuthorization: () => ({ hasPermission: () => mocks.manage }),
+  useCurrentUserAuthorization: () => ({
+    hasPermission: (permission: string) =>
+      permission === "repositories.read" ? mocks.readRepositories : mocks.manage,
+  }),
 }));
 vi.mock("@/hooks/use-repos", () => ({
-  useRepos: () => ({ repos: [{ fullName: "Group/Subgroup/Repo" }] }),
+  useRepos: mocks.useRepos,
 }));
 vi.mock("@/hooks/use-opencode-plugins", () => ({
   useOpencodePlugins: () => ({
@@ -23,7 +33,8 @@ vi.mock("@/hooks/use-opencode-plugins", () => ({
   saveOpencodePlugin: mocks.save,
   deleteOpencodePlugin: mocks.remove,
 }));
-beforeEach(() =>
+beforeEach(() => {
+  mocks.useRepos.mockReturnValue({ repos: [{ fullName: "Group/Subgroup/Repo" }] });
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -31,13 +42,14 @@ beforeEach(() =>
       unobserve() {}
       disconnect() {}
     }
-  )
-);
+  );
+});
 afterEach(() => {
   vi.unstubAllGlobals();
   cleanup();
   vi.clearAllMocks();
   mocks.manage = true;
+  mocks.readRepositories = true;
 });
 
 describe("OpenCode plugin settings", () => {
@@ -81,4 +93,25 @@ describe("OpenCode plugin settings", () => {
     await user.click(screen.getByRole("button", { name: /Delete/ }));
     await waitFor(() => expect(mocks.remove).toHaveBeenCalledWith("audit"));
   });
+});
+
+it("lets a plugin manager enter nested repository scopes without repository-read access", async () => {
+  mocks.readRepositories = false;
+  mocks.useRepos.mockReturnValue({ repos: [] });
+  const user = userEvent.setup();
+  render(<OpencodePluginsSettings />);
+  expect(mocks.useRepos).toHaveBeenCalledWith(false);
+  await user.click(screen.getByRole("button", { name: "Add plugin" }));
+  await user.type(screen.getByLabelText("Package and exact version"), "audit@1.0.0");
+  await user.click(screen.getByLabelText(/Selected repositories/));
+  await user.type(screen.getByLabelText("Repository name"), "Group/Subgroup/Service");
+  await user.click(screen.getByRole("button", { name: "Add repository" }));
+  expect(screen.getByLabelText("group/subgroup/service")).toBeChecked();
+  await user.click(screen.getByRole("button", { name: "Save plugin" }));
+  await waitFor(() =>
+    expect(mocks.save).toHaveBeenCalledWith(
+      { spec: "audit@1.0.0", enabled: true, repoScopes: ["group/subgroup/service"] },
+      undefined
+    )
+  );
 });
