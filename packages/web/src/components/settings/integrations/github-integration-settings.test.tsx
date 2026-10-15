@@ -48,7 +48,10 @@ vi.mock("@/hooks/use-enabled-models", () => ({
       },
       {
         category: "OpenAI",
-        models: [{ id: "openai/gpt-5.4", name: "GPT 5.4" }],
+        models: [
+          { id: "openai/gpt-5.4", name: "GPT 5.4" },
+          { id: "openai/gpt-5.6-sol", name: "GPT 5.6 Sol" },
+        ],
       },
     ],
   }),
@@ -567,6 +570,27 @@ describe("GitHubIntegrationSettings", () => {
     );
   });
 
+  it("offers Codex reasoning efforts for global defaults", async () => {
+    const user = userEvent.setup();
+    setupSWR({
+      global: {
+        defaults: {
+          harness: "codex",
+          model: "openai/gpt-5.6-sol",
+          reasoningEffort: "max",
+        },
+      },
+    });
+
+    render(<GitHubIntegrationSettings />);
+
+    const reasoning = screen.getByRole("combobox", { name: "Default reasoning effort" });
+    expect(reasoning).toHaveTextContent("max");
+    await user.click(reasoning);
+    expect(screen.getByRole("option", { name: "max" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "none" })).not.toBeInTheDocument();
+  });
+
   it.each([undefined, "anthropic/claude-sonnet-4-6", "openai/gpt-5.4"])(
     "requires a repo model with an explicit Claude harness despite global model=%s",
     async (inheritedModel) => {
@@ -741,6 +765,60 @@ describe("GitHubIntegrationSettings", () => {
     await user.click(await screen.findByRole("option", { name: "OpenCode" }));
     expect(within(row).queryByText(/Sessions using this default model will be refused/)).toBeNull();
     expect(within(row).getByRole("button", { name: /^save$/i })).toBeEnabled();
+  });
+
+  it("keeps a sparse effort visible when the inherited harness makes it incompatible", async () => {
+    const user = userEvent.setup();
+    setupSWR({
+      global: { defaults: { model: "openai/gpt-5.6-sol" } },
+      repos: [
+        {
+          repo: "acme/web",
+          settings: { model: "openai/gpt-5.6-sol", reasoningEffort: "none" },
+        },
+      ],
+      availableRepos: [repo("acme/web")],
+    });
+    fetchMock.mockResolvedValue(okJson({}));
+    const view = render(<GitHubIntegrationSettings />);
+    const row = repoOverrideRow("acme/web");
+    const reasoning = within(row).getByRole("combobox", { name: "Reasoning effort" });
+    expect(reasoning).toHaveTextContent("none");
+    expect(within(row).queryByText(/Sessions using this default model will be refused/)).toBeNull();
+
+    setupSWR({
+      global: { defaults: { harness: "codex", model: "openai/gpt-5.6-sol" } },
+      repos: [
+        {
+          repo: "acme/web",
+          settings: { model: "openai/gpt-5.6-sol", reasoningEffort: "none" },
+        },
+      ],
+      availableRepos: [repo("acme/web")],
+    });
+    view.rerender(<GitHubIntegrationSettings />);
+
+    expect(reasoning).toHaveTextContent("none");
+    expect(
+      within(row).getByText(/Sessions using this default model will be refused/)
+    ).toHaveTextContent(
+      'Reasoning effort "none" cannot run on openai/gpt-5.6-sol with the Codex harness.'
+    );
+
+    await selectAutoReviewMode(row, /override for this repo/i);
+    await user.click(within(row).getByRole("button", { name: /^save$/i }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/integration-settings/github/repos/acme/web",
+      expect.objectContaining({
+        body: JSON.stringify({
+          settings: {
+            model: "openai/gpt-5.6-sol",
+            reasoningEffort: "none",
+            autoReviewOnOpen: true,
+          },
+        }),
+      })
+    );
   });
 
   it("clears incompatible model and effort when inheriting the global Claude harness", async () => {

@@ -25,7 +25,10 @@ const { authorization, modelOptions, useSWRMock, mutateMock, toastSuccess, toast
       },
       {
         category: "OpenAI",
-        models: [{ id: "openai/gpt-6-sol", name: "GPT 6 Sol", description: "" }],
+        models: [
+          { id: "openai/gpt-6-sol", name: "GPT 6 Sol", description: "" },
+          { id: "openai/gpt-5.6-sol", name: "GPT 5.6 Sol", description: "" },
+        ],
       },
     ] satisfies ModelCategory[],
     useSWRMock: vi.fn(),
@@ -329,6 +332,27 @@ describe("LinearIntegrationSettings harness", () => {
     expect(body.settings.defaults).not.toHaveProperty("reasoningEffort");
   });
 
+  it("offers Codex reasoning efforts for global defaults", async () => {
+    const user = userEvent.setup();
+    setupSWR({
+      settings: {
+        defaults: {
+          harness: "codex",
+          model: "openai/gpt-5.6-sol",
+          reasoningEffort: "max",
+        },
+      },
+    });
+
+    render(<LinearIntegrationSettings />);
+
+    const reasoning = screen.getByRole("combobox", { name: "Default reasoning effort" });
+    expect(reasoning).toHaveTextContent("max");
+    await user.click(reasoning);
+    expect(screen.getByRole("option", { name: "max" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "none" })).not.toBeInTheDocument();
+  });
+
   it("filters repository models by the inherited harness and saves an explicit override", async () => {
     const user = userEvent.setup();
     setupSWR({
@@ -448,6 +472,51 @@ describe("LinearIntegrationSettings harness", () => {
     expect(within(row).getByRole("button", { name: "Save" })).toBeEnabled();
   });
 
+  it("keeps a sparse effort visible when the inherited harness makes it incompatible", async () => {
+    setupSWR({
+      settings: { defaults: { model: "openai/gpt-5.6-sol" } },
+      overrides: [
+        {
+          repo: "acme/web",
+          settings: { model: "openai/gpt-5.6-sol", reasoningEffort: "none" },
+        },
+      ],
+    });
+    vi.mocked(browserApiFetch).mockResolvedValueOnce(Response.json({ ok: true }));
+    const view = render(<LinearIntegrationSettings />);
+    const row = screen.getByText("acme/web").parentElement!;
+    const reasoning = within(row).getByRole("combobox", { name: "Reasoning effort" });
+    expect(reasoning).toHaveTextContent("none");
+    expect(within(row).queryByText(/Sessions using this default model will be refused/)).toBeNull();
+
+    setupSWR({
+      settings: { defaults: { harness: "codex", model: "openai/gpt-5.6-sol" } },
+      overrides: [
+        {
+          repo: "acme/web",
+          settings: { model: "openai/gpt-5.6-sol", reasoningEffort: "none" },
+        },
+      ],
+    });
+    view.rerender(<LinearIntegrationSettings />);
+
+    expect(reasoning).toHaveTextContent("none");
+    expect(
+      within(row).getByText(/Sessions using this default model will be refused/)
+    ).toHaveTextContent(
+      'Reasoning effort "none" cannot run on openai/gpt-5.6-sol with the Codex harness.'
+    );
+
+    fireEvent.click(within(row).getByRole("checkbox", { name: "Tool updates" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mutateMock).toHaveBeenCalledWith(repoKey));
+    const body = JSON.parse(String(vi.mocked(browserApiFetch).mock.calls[0][1]?.body));
+    expect(body.settings).toMatchObject({
+      model: "openai/gpt-5.6-sol",
+      reasoningEffort: "none",
+    });
+  });
+
   it("requires a model for saved global Claude settings and describes launch refusal, not fallback", () => {
     setupSWR({
       settings: { defaults: { harness: "claude" } },
@@ -550,6 +619,7 @@ describe("LinearIntegrationSettings harness", () => {
       "Use system default",
       "Claude Sonnet 4.6",
       "GPT 6 Sol",
+      "GPT 5.6 Sol",
     ]);
     await user.click(model);
     await user.click(await screen.findByRole("option", { name: "Use system default" }));
@@ -563,6 +633,7 @@ describe("LinearIntegrationSettings harness", () => {
       "Use global model",
       "Claude Sonnet 4.6",
       "GPT 6 Sol",
+      "GPT 5.6 Sol",
     ]);
     fireEvent.click(within(row).getByRole("checkbox", { name: "Tool updates" }));
     await user.click(within(row).getByRole("button", { name: "Save" }));
