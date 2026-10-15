@@ -446,6 +446,80 @@ describe.each(["web", "api"] as const)("%s admission", (source) => {
 });
 
 describe("participant preparation and validation", () => {
+  it.each(["opencode", "codex"] as const)(
+    "does not enrich a duplicate or conflicting API retry on %s",
+    async (harness) => {
+      const h = buildAdmission();
+      h.session.harness = harness;
+      h.session.model = "openai/gpt-6.1-sol";
+      const request = {
+        ...prompt,
+        authorId: client.userId,
+        source: "github" as const,
+        canonicalUserId: "old-user",
+        scmEnrichment: { userId: "1001", login: "old-login", name: "Old Name", email: null },
+      };
+      const first = await h.admission.enqueueFromApi(request);
+      h.participant.canonical_user_id = "current-user";
+      h.participant.scm_login = "current-login";
+      h.participantRepository.updateParticipantCoalesce.mockClear();
+      h.participantRepository.updateParticipantIdentity.mockClear();
+
+      await expect(h.admission.enqueueFromApi(request)).resolves.toEqual({
+        ...first,
+        deduplicated: true,
+      });
+      await expect(
+        h.admission.enqueueFromApi({ ...request, content: "Different content" })
+      ).rejects.toBeInstanceOf(PromptRequestConflictError);
+
+      expect(h.participantRepository.updateParticipantCoalesce).not.toHaveBeenCalled();
+      expect(h.participantRepository.updateParticipantIdentity).not.toHaveBeenCalled();
+      expect(h.messageRepository.createMessageWithAttachments).toHaveBeenCalledOnce();
+      expect(h.sessionIndex.touchUpdatedAt).toHaveBeenCalledTimes(2);
+    }
+  );
+
+  it("does not enrich a request deduplicated after the strict-auth await", async () => {
+    const h = buildAdmission();
+    h.session.harness = "codex";
+    h.session.model = "openai/gpt-6.1-sol";
+    const auth = deferred<string | null>();
+    const entered = deferred<void>();
+    h.policy.getProviderAuthenticationError.mockImplementationOnce(() => {
+      entered.resolve();
+      return auth.promise;
+    });
+    const request = {
+      ...prompt,
+      authorId: client.userId,
+      source: "github" as const,
+      canonicalUserId: "old-user",
+      scmEnrichment: { userId: "1001", login: "old-login", name: "Old Name", email: null },
+    };
+    const delayed = h.admission.enqueueFromApi(request);
+    await entered.promise;
+    expect(h.participantRepository.updateParticipantCoalesce).not.toHaveBeenCalled();
+    expect(h.participantRepository.updateParticipantIdentity).not.toHaveBeenCalled();
+    const first = await h.admission.enqueueFromApi({
+      ...request,
+      canonicalUserId: "current-user",
+      scmEnrichment: { ...request.scmEnrichment, login: "current-login" },
+    });
+    auth.resolve(null);
+    await expect(delayed).resolves.toEqual({ ...first, deduplicated: true });
+
+    expect(h.participantRepository.updateParticipantCoalesce).toHaveBeenCalledExactlyOnceWith(
+      client.participantId,
+      { canonicalUserId: "current-user" }
+    );
+    expect(h.participantRepository.updateParticipantIdentity).toHaveBeenCalledExactlyOnceWith(
+      client.participantId,
+      expect.objectContaining({ canonicalUserId: "current-user", scmLogin: "current-login" })
+    );
+    expect(h.messageRepository.createMessageWithAttachments).toHaveBeenCalledOnce();
+  });
+
   it("prefers the web participant id, then falls back to user lookup and creation", async () => {
     const h = buildAdmission();
     await h.admission.enqueueFromWeb(client, { content: "First" });

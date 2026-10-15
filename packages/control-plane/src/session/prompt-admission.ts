@@ -165,28 +165,6 @@ export class SessionPromptAdmission {
         : this.participantService.create(data.authorId, name);
     }
 
-    if (data.canonicalUserId) {
-      this.participantRepository.updateParticipantCoalesce(participant.id, {
-        canonicalUserId: data.canonicalUserId,
-      });
-      participant = this.participantRepository.getParticipantById(participant.id) ?? {
-        ...participant,
-        canonical_user_id: data.canonicalUserId,
-      };
-    }
-
-    if (data.scmEnrichment !== undefined) {
-      const enrichment = data.scmEnrichment;
-      this.participantRepository.updateParticipantIdentity(participant.id, {
-        canonicalUserId: data.canonicalUserId ?? participant.canonical_user_id ?? null,
-        scmName: enrichment.name,
-        scmEmail: enrichment.email,
-        scmLogin: enrichment.login,
-        scmUserId: enrichment.userId,
-      });
-      participant = this.participantRepository.getParticipantById(participant.id) ?? participant;
-    }
-
     const enqueued = await this.enqueuePromptCore({
       participant,
       userId: data.authorId,
@@ -197,6 +175,8 @@ export class SessionPromptAdmission {
       attachments: data.attachments,
       callbackContext: data.callbackContext,
       clientRequestId: data.clientRequestId,
+      canonicalUserId: data.canonicalUserId,
+      scmEnrichment: data.scmEnrichment,
     });
 
     // An already-active session keeps its index timestamp through the status sync, so
@@ -314,6 +294,25 @@ export class SessionPromptAdmission {
       this.log,
       getValidHarnessOrDefault(this.repository.getSession()?.harness)
     );
+
+    // Only new work refreshes identity. Keep this after both duplicate checks
+    // and synchronous with insertion so a retry cannot restore stale attribution.
+    if (data.canonicalUserId) {
+      this.participantRepository.updateParticipantCoalesce(data.participant.id, {
+        canonicalUserId: data.canonicalUserId,
+      });
+    }
+    if (data.scmEnrichment !== undefined) {
+      const enrichment = data.scmEnrichment;
+      this.participantRepository.updateParticipantIdentity(data.participant.id, {
+        canonicalUserId: data.canonicalUserId ?? data.participant.canonical_user_id ?? null,
+        scmName: enrichment.name,
+        scmEmail: enrichment.email,
+        scmLogin: enrichment.login,
+        scmUserId: enrichment.userId,
+      });
+    }
+
     try {
       this.messageRepository.createMessageWithAttachments(
         {
