@@ -527,6 +527,35 @@ describe("fetchBulkSkillImport", () => {
     expect(calls).toEqual({ access: 1, resolve: 1, tree: 1, blobs: 229 });
   });
 
+  it("shares a bounded blob queue across independent skill roots", async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 12 }, (_, index) => [
+        `catalog/skill-${String(index).padStart(2, "0")}/SKILL.md`,
+        { content: `---\nname: skill-${index}\ndescription: Skill ${index}\n---\nbody\n` },
+      ]).reverse()
+    );
+    const provider = fakeProvider(files);
+    const readBlob = provider.readBlob.bind(provider);
+    let active = 0;
+    let peak = 0;
+    provider.readBlob = async (...args) => {
+      active++;
+      peak = Math.max(peak, active);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        return await readBlob(...args);
+      } finally {
+        active--;
+      }
+    };
+    const result = await fetchBulkSkillImport(provider, source({ subdirectory: "catalog" }));
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(6);
+    expect(result.skills.map((skill) => skill.name)).toEqual(
+      Array.from({ length: 12 }, (_, index) => `skill-${index}`)
+    );
+  });
+
   it("preserves per-skill name and frontmatter warnings", async () => {
     const result = await fetchBulkSkillImport(
       fakeProvider({
