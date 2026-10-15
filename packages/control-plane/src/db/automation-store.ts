@@ -88,6 +88,7 @@ export interface AutomationRow {
   enabled: number; // SQLite integer boolean
   next_run_at: number | null;
   consecutive_failures: number;
+  max_retries?: number;
   created_by: string;
   user_id: string | null;
   owner_team_id: string | null;
@@ -121,6 +122,10 @@ type AutomationListResult = { automations: AutomationRow[] } & (
 export const EXECUTION_TIMEOUT_FAILURE_REASON = "execution_timeout";
 
 export interface AutomationRunRow {
+  attempt?: number;
+  retry_at?: number | null;
+  superseded_at?: number | null;
+  retryable?: number;
   id: string;
   automation_id: string;
   /** Owning invocation. */
@@ -209,6 +214,7 @@ export interface AutomationEnvironmentRow {
 }
 
 export interface AutomationInvocationRow {
+  retry_context?: string | null;
   id: string;
   automation_id: string;
   source: AutomationInvocationSource;
@@ -282,6 +288,7 @@ export interface InvocationRunAggregate {
   completed: number;
   skipped: number;
   lastCompletedAt: number | null;
+  retrying?: number;
 }
 
 // ─── Mappers ─────────────────────────────────────────────────────────────────
@@ -317,6 +324,7 @@ export function toAutomation(
     enabled: row.enabled === 1,
     nextRunAt: row.next_run_at,
     consecutiveFailures: row.consecutive_failures,
+    maxRetries: row.max_retries ?? 0,
     createdBy: row.created_by,
     userId: row.user_id,
     ownerTeamId: row.owner_team_id,
@@ -338,6 +346,9 @@ export function toAutomationRun(row: EnrichedRunRow): AutomationRun {
     invocationId: row.invocation_id,
     sessionId: row.session_id,
     status: row.status,
+    attempt: row.attempt ?? 1,
+    retryAt: row.retry_at ?? null,
+    supersededAt: row.superseded_at ?? null,
     skipReason: row.skip_reason,
     failureReason: row.failure_reason,
     scheduledAt: row.scheduled_at,
@@ -365,7 +376,8 @@ export function toAutomationRun(row: EnrichedRunRow): AutomationRun {
 
 const DERIVED_INVOCATION_STATUS_SQL = `CASE
   WHEN COUNT(r.id) = 0 THEN 'skipped'
-  WHEN SUM(CASE WHEN r.status IN ('starting', 'running') THEN 1 ELSE 0 END) > 0 THEN
+  WHEN SUM(CASE WHEN r.status = 'retrying' THEN 1 ELSE 0 END) > 0 THEN 'retrying'
+  WHEN SUM(CASE WHEN r.status IN ('starting', 'running', 'retrying') THEN 1 ELSE 0 END) > 0 THEN
     CASE
       WHEN SUM(CASE WHEN r.status <> 'starting' THEN 1 ELSE 0 END) = 0 THEN 'starting'
       ELSE 'running'
@@ -380,7 +392,7 @@ END`;
 /** Derived completion time: latest child completion once all children are terminal. */
 const DERIVED_INVOCATION_COMPLETED_AT_SQL = `CASE
   WHEN COUNT(r.id) = 0 THEN NULL
-  WHEN SUM(CASE WHEN r.status IN ('starting', 'running') THEN 1 ELSE 0 END) > 0 THEN NULL
+  WHEN SUM(CASE WHEN r.status IN ('starting', 'running', 'retrying') THEN 1 ELSE 0 END) > 0 THEN NULL
   ELSE MAX(r.completed_at)
 END`;
 
@@ -389,7 +401,7 @@ const ENRICHED_INVOCATION_SELECT_SQL = `SELECT i.*,
   ${DERIVED_INVOCATION_STATUS_SQL} AS derived_status,
   ${DERIVED_INVOCATION_COMPLETED_AT_SQL} AS derived_completed_at
 FROM automation_invocations i
-LEFT JOIN automation_runs r ON r.invocation_id = i.id`;
+LEFT JOIN automation_runs r ON r.invocation_id = i.id AND r.superseded_at IS NULL`;
 
 /** Child runs shaped as EnrichedRunRow; callers append WHERE … ORDER BY. */
 const INVOCATION_CHILD_RUN_SELECT_SQL = `SELECT r.*, s.title AS session_title, NULL AS artifact_summary
@@ -415,8 +427,10 @@ export function deriveInvocationStatus(counts: {
   // Required: distinguishes "starting" from "running". InvocationRunAggregate
   // folds both into `active` and has no `starting`, so it must not be passed here.
   starting: number;
+  retrying?: number;
 }): AutomationInvocationStatus {
   if (counts.total === 0) return "skipped";
+  if (counts.retrying) return "retrying";
   if (counts.active > 0) {
     return counts.starting === counts.total ? "starting" : "running";
   }
@@ -465,8 +479,8 @@ export class AutomationStore {
          (id, name, instructions,
           trigger_type, schedule_cron, schedule_tz, harness, model, reasoning_effort, enabled, next_run_at,
           consecutive_failures, created_by, user_id, created_at, updated_at, deleted_at,
-           event_type, trigger_config, trigger_auth_data, owner_team_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           event_type, trigger_config, trigger_auth_data, owner_team_id, max_retries)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         row.id,
@@ -489,7 +503,8 @@ export class AutomationStore {
         row.event_type,
         row.trigger_config,
         row.trigger_auth_data,
-        row.owner_team_id
+        row.owner_team_id,
+        row.max_retries ?? 0
       );
   }
 
@@ -649,7 +664,7 @@ export class AutomationStore {
          SELECT i.id, i.automation_id, i.created_at,
                 ${DERIVED_INVOCATION_STATUS_SQL} AS derived_status
          FROM recent_invocations i
-         LEFT JOIN automation_runs r ON r.invocation_id = i.id
+         LEFT JOIN automation_runs r ON r.invocation_id = i.id AND r.superseded_at IS NULL
          GROUP BY i.id
          ORDER BY i.automation_id, i.created_at DESC, i.id DESC`
       )
@@ -683,6 +698,7 @@ export class AutomationStore {
     // Repository fields are deliberately absent: the selection lives in
     // automation_repositories, written only by bindReplaceRepositories.
     const allowedFields: (keyof AutomationRow)[] = [
+      "max_retries",
       "name",
       "instructions",
       "schedule_cron",
@@ -1027,6 +1043,7 @@ export class AutomationStore {
     const params: unknown[] = [];
 
     const allowedFields: (keyof AutomationRunRow)[] = [
+      "retryable",
       "session_id",
       "status",
       "failure_reason",
@@ -1072,7 +1089,7 @@ export class AutomationStore {
       .prepare(
         `UPDATE automation_runs
          SET status = 'running', session_id = ?, started_at = ?, execution_deadline_at = ?,
-             first_prompt_pending = 1
+             first_prompt_pending = 1, retryable = 0
          WHERE id = ? AND status = 'starting'`
       )
       .bind(sessionId, startedAt, executionDeadlineAt, id)
@@ -1155,7 +1172,7 @@ export class AutomationStore {
     return this.db
       .prepare(
         `SELECT * FROM automation_runs
-         WHERE automation_id = ? AND status IN ('starting', 'running')
+         WHERE automation_id = ? AND status IN ('starting', 'running', 'retrying')
          ORDER BY created_at DESC LIMIT 1`
       )
       .bind(automationId)
@@ -1196,13 +1213,13 @@ export class AutomationStore {
               JOIN automation_invocations ai ON ai.id = ar.invocation_id
               WHERE ar.automation_id = ?
                 AND ai.concurrency_key = ?
-                AND ar.status IN ('starting', 'running')`,
+                AND ar.status IN ('starting', 'running', 'retrying')`,
         params: [automationId, scope.concurrencyKey],
       };
     }
     return {
       sql: `SELECT 1 FROM automation_runs ar
-            WHERE ar.automation_id = ? AND ar.status IN ('starting', 'running')`,
+            WHERE ar.automation_id = ? AND ar.status IN ('starting', 'running', 'retrying')`,
       params: [automationId],
     };
   }
@@ -1251,8 +1268,8 @@ export class AutomationStore {
         .prepare(
           `INSERT INTO automation_invocations
            (id, automation_id, source, scheduled_at, trigger_key, concurrency_key,
-            trigger_metadata, skip_reason, failure_counted_at, created_at, updated_at)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            trigger_metadata, skip_reason, failure_counted_at, created_at, updated_at, retry_context)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
            WHERE NOT EXISTS (${overlap.sql}) ${grantsGuard.sql}`
         )
         .bind(
@@ -1267,6 +1284,7 @@ export class AutomationStore {
           invocation.failure_counted_at,
           invocation.created_at,
           invocation.updated_at,
+          invocation.retry_context ?? null,
           ...overlap.params,
           ...grantsGuard.params
         )
@@ -1279,8 +1297,8 @@ export class AutomationStore {
             `INSERT INTO automation_runs
              (id, automation_id, invocation_id, session_id, status, skip_reason, failure_reason,
               scheduled_at, started_at, completed_at, created_at,
-              repo_owner, repo_name, repo_id, base_branch, environment_id)
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+              repo_owner, repo_name, repo_id, base_branch, environment_id, retryable)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM automation_invocations WHERE id = ?)`
           )
           .bind(
@@ -1300,6 +1318,7 @@ export class AutomationStore {
             child.repo_id,
             child.base_branch,
             child.environment_id,
+            child.retryable ?? 0,
             invocation.id
           )
       );
@@ -1423,6 +1442,13 @@ export class AutomationStore {
       inserted: (results[0]?.meta?.changes ?? 0) > 0,
       paused: (results[1]?.meta?.changes ?? 0) > 0,
     };
+  }
+
+  async setRetryContext(invocationId: string, context: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE automation_invocations SET retry_context = ? WHERE id = ?")
+      .bind(context, invocationId)
+      .run();
   }
 
   async getInvocationById(invocationId: string): Promise<AutomationInvocationRow | null> {
@@ -1587,12 +1613,16 @@ export class AutomationStore {
       .prepare(
         `SELECT
            COUNT(*) AS total,
-           COALESCE(SUM(CASE WHEN status IN ('starting', 'running') THEN 1 ELSE 0 END), 0) AS active,
+           COALESCE(SUM(CASE WHEN status IN ('starting', 'running', 'retrying') THEN 1 ELSE 0 END), 0) AS active,
            COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
            COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
            COALESCE(SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END), 0) AS skipped,
+           COALESCE(SUM(CASE WHEN status = 'retrying' OR
+             (status IN ('starting', 'running') AND EXISTS
+               (SELECT 1 FROM automations a WHERE a.id = automation_runs.automation_id AND a.max_retries > 0))
+             THEN 1 ELSE 0 END), 0) AS retrying,
            MAX(completed_at) AS last_completed_at
-         FROM automation_runs WHERE invocation_id = ?`
+         FROM automation_runs WHERE invocation_id = ? AND superseded_at IS NULL`
       )
       .bind(invocationId)
       .first<{
@@ -1602,6 +1632,7 @@ export class AutomationStore {
         completed: number;
         skipped: number;
         last_completed_at: number | null;
+        retrying: number;
       }>();
 
     return {
@@ -1611,6 +1642,7 @@ export class AutomationStore {
       completed: row?.completed ?? 0,
       skipped: row?.skipped ?? 0,
       lastCompletedAt: row?.last_completed_at ?? null,
+      retrying: row?.retrying ?? 0,
     };
   }
 
@@ -1700,7 +1732,7 @@ export class AutomationStore {
            AND i.failure_counted_at IS NULL
            AND EXISTS (
              SELECT 1 FROM automation_runs r
-             WHERE r.invocation_id = i.id AND r.status = 'failed')
+             WHERE r.invocation_id = i.id AND r.status = 'failed' AND r.superseded_at IS NULL)
            AND NOT EXISTS (
              SELECT 1 FROM automation_runs r
              WHERE r.invocation_id = i.id AND r.status IN ('starting', 'running'))
@@ -1778,7 +1810,7 @@ export class AutomationStore {
          JOIN automation_invocations i ON i.id = r.invocation_id
          WHERE r.automation_id = ?
            AND i.concurrency_key = ?
-           AND r.status IN ('starting', 'running')
+           AND r.status IN ('starting', 'running', 'retrying')
          ORDER BY r.created_at DESC LIMIT 1`
       )
       .bind(automationId, concurrencyKey)
@@ -1812,6 +1844,7 @@ export class AutomationStore {
          LEFT JOIN sessions s ON r.session_id = s.id
          WHERE r.automation_id = ?
            AND i.concurrency_key = ?
+           AND r.superseded_at IS NULL AND r.status <> 'retrying'
            AND (
              s.id IS NOT NULL
              OR r.status = 'starting'

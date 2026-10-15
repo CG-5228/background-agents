@@ -365,6 +365,7 @@ async function handleCreateAutomation(
     enabled: 1,
     next_run_at: nextRunAt,
     consecutive_failures: 0,
+    max_retries: body.maxRetries ?? 0,
     created_by: enforced.participantUserId,
     user_id: resolvedUserId,
     created_at: now,
@@ -604,6 +605,7 @@ async function handleUpdateAutomation(
   if (body.name !== undefined) updateFields.name = body.name.trim();
   if (body.instructions !== undefined) updateFields.instructions = body.instructions;
   if (body.scheduleCron !== undefined) updateFields.schedule_cron = body.scheduleCron;
+  if (body.maxRetries !== undefined) updateFields.max_retries = body.maxRetries;
   if (body.scheduleTz !== undefined) updateFields.schedule_tz = body.scheduleTz;
   if (body.harness !== undefined) updateFields.harness = nextHarness;
   if (body.model !== undefined) updateFields.model = nextModel;

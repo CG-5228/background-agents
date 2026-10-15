@@ -13,6 +13,7 @@ import type { SqlDatabase } from "../db/sql-database";
 import type { FetchClient } from "../platform-ports";
 import { fakeSessionRuntimeDispatch } from "../router.test-support";
 import type { Logger } from "../logger";
+import type * as AutomationRetries from "../db/automation-retries";
 import type * as AuthCrypto from "../auth/crypto";
 import type { AutomationRow, InvocationRunAggregate } from "../db/automation-store";
 import { normalizeWebhookEvent, type SlackAutomationEvent } from "@open-inspect/shared/triggers";
@@ -20,6 +21,13 @@ import { verifyCallbackSignature } from "@open-inspect/shared/auth";
 import type { Team } from "@open-inspect/shared/types/teams";
 import type { EffectiveAuthorization } from "@open-inspect/shared/rbac";
 import type * as SessionAdmissionModule from "../authorization/session-admission";
+
+vi.mock("../db/automation-retries", async (importOriginal) => ({
+  ...(await importOriginal<typeof AutomationRetries>()),
+  scheduleInvocationRetries: vi.fn().mockResolvedValue(undefined),
+  getDueRetries: vi.fn().mockResolvedValue([]),
+  claimRetry: vi.fn().mockResolvedValue(null),
+}));
 
 const mockSelectSessionMemory = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -177,6 +185,7 @@ function createMockStore() {
     }),
     insertSkippedInvocation: vi.fn().mockResolvedValue({ inserted: true }),
     recordAuthorizationDenied: vi.fn().mockResolvedValue({ inserted: true, paused: true }),
+    setRetryContext: vi.fn().mockResolvedValue(undefined),
     getInvocationById: vi.fn().mockResolvedValue(null),
     getInvocationIdByTriggerKey: vi.fn().mockResolvedValue(null),
     claimFollowUpReceipt: vi.fn().mockResolvedValue({ kind: "claimed" }),
@@ -2628,6 +2637,7 @@ describe("Scheduler", () => {
       expect(mockStore.updateRun).toHaveBeenCalledWith("run-1", {
         status: "failed",
         failure_reason: "Sandbox crashed",
+        retryable: 1,
         completed_at: expect.any(Number),
       });
       expect(mockStore.tryMarkInvocationFailureCounted).toHaveBeenCalledWith("inv-1");

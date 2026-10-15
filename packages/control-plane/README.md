@@ -593,3 +593,20 @@ for the complete list.
 | Ping/pong WebSocket health         | Send ping, verify pong                |
 | Typing triggers sandbox warm       | Send typing, verify warming event     |
 | Presence sync on connect           | Connect 2 clients, verify presence    |
+
+### Retrying failed automation runs
+
+Create or update an automation with `maxRetries` (an integer from 0 to 5), or use **Maximum
+retries** in the automation form. The default is 0. Retries use the existing scheduler tick: backoff
+starts at two minutes and doubles after each failed attempt, so a retry may start up to one tick
+after its due time. Only failed targets are retried; successful targets stay completed. Each attempt
+has its own run and session, while retaining the original invocation, target, prompt, and execution
+user. Current authorization and provider settings are checked again at launch.
+
+Run history exposes `attempt`, `retryAt`, and `supersededAt`, and reports `retrying` while waiting.
+Superseded attempts retain their failures but do not affect the invocation's final status. Failure
+streaks and auto-pause account for the final result after retries, rather than each attempt.
+Pausing/deleting the automation or disabling retries withdraws pending retries. Explicitly cancelled
+executions are not retried. Recovery timeouts and ambiguous prompt delivery failures remain failed
+because the original execution might still be running. A fresh attempt can repeat side effects
+performed before a confirmed failure, so enable retries only for jobs that tolerate that repetition.
