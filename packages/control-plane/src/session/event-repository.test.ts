@@ -1,0 +1,107 @@
+import { DatabaseSync } from "node:sqlite";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createNodeSqlStorage } from "../node/sqlite-storage";
+import {
+  EventRepository,
+  MAX_RECOVERY_CONTEXT_CHARS,
+  MAX_RECOVERY_CONTEXT_MESSAGES,
+} from "./event-repository";
+import { initSchema } from "./schema";
+
+describe("conversation recovery from durable events", () => {
+  let db: DatabaseSync;
+  let events: EventRepository;
+
+  beforeEach(() => {
+    db = new DatabaseSync(":memory:");
+    const storage = createNodeSqlStorage(db);
+    initSchema(storage.sql);
+    events = new EventRepository(storage.sql, storage.transactionSync);
+  });
+
+  afterEach(() => db.close());
+
+  function user(id: string, content: string, createdAt = 1000) {
+    events.createEvent({
+      id: `user:${id}`,
+      type: "user_message",
+      messageId: id,
+      data: JSON.stringify({ type: "user_message", content }),
+      createdAt,
+    });
+  }
+
+  function token(id: string, content: string, partId?: string) {
+    events.upsertTokenEvent(
+      id,
+      {
+        type: "token",
+        messageId: id,
+        sandboxId: "old-sandbox",
+        timestamp: 1,
+        content,
+        ...(partId ? { partId } : {}),
+      },
+      1000
+    );
+  }
+
+  it("recovers multi-turn decisions in timeline order without duplicate token updates", () => {
+    user("first", "Use X, never Y.");
+    token("first", "I will");
+    token("first", "I will implement X in parser.py.");
+    user("second", "Keep its existing API.");
+    token("second", "I checked the API.", "part-1");
+    token("second", "The signature will stay.", "part-2");
+    // A failed send can leave a durable current user event. Never echo it back.
+    user("current", "Continue.");
+    events.createEvent({
+      id: "tool",
+      type: "tool_call",
+      data: JSON.stringify({ output: "raw file" }),
+      messageId: "second",
+      createdAt: 1000,
+    });
+
+    expect(events.getRecoveryContext("current")).toEqual({
+      messages: [
+        { role: "user", content: "Use X, never Y." },
+        { role: "assistant", content: "I will implement X in parser.py." },
+        { role: "user", content: "Keep its existing API." },
+        { role: "assistant", content: "I checked the API." },
+        { role: "assistant", content: "The signature will stay." },
+      ],
+      truncated: false,
+    });
+  });
+
+  it("returns no fallback for an initial prompt", () => {
+    expect(events.getRecoveryContext("initial")).toEqual({ messages: [], truncated: false });
+  });
+
+  it("bounds the latest text and reports omitted older context", () => {
+    user("old", "An older decision.", 1);
+    user("large", "x".repeat(MAX_RECOVERY_CONTEXT_CHARS + 10));
+    const context = events.getRecoveryContext("current");
+    expect(context).toEqual({
+      messages: [{ role: "user", content: "x".repeat(MAX_RECOVERY_CONTEXT_CHARS) }],
+      truncated: true,
+    });
+  });
+
+  it("bounds the number of events even for many small messages", () => {
+    for (let i = 0; i <= MAX_RECOVERY_CONTEXT_MESSAGES; i++) user(`m${i}`, `${i}`);
+    const context = events.getRecoveryContext("current");
+    expect(context.messages).toHaveLength(MAX_RECOVERY_CONTEXT_MESSAGES);
+    expect(context.messages[0].content).toBe("1");
+    expect(context.messages.at(-1)?.content).toBe(`${MAX_RECOVERY_CONTEXT_MESSAGES}`);
+    expect(context.truncated).toBe(true);
+  });
+
+  it("does not split a Unicode surrogate pair at the text budget", () => {
+    user("unicode", "x".repeat(MAX_RECOVERY_CONTEXT_CHARS - 1) + "😀tail");
+    const context = events.getRecoveryContext("current");
+    expect(context.messages[0].content).toBe("x".repeat(MAX_RECOVERY_CONTEXT_CHARS - 1));
+    expect(context.truncated).toBe(true);
+  });
+});

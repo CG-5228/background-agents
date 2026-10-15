@@ -760,9 +760,33 @@ class AgentBridge:
         )
 
         try:
-            harness, attachments = await self._prepare_turn(
+            harness, attachments, session_created = await self._prepare_turn(
                 message_id, author_data, raw_attachments, turn_deadline
             )
+
+            recovery_context = cmd.get("recoveryContext") or {}
+            if session_created and recovery_context.get("messages"):
+                truncation = (
+                    " The recovered transcript was truncated to the most recent text."
+                    if recovery_context.get("truncated")
+                    else ""
+                )
+                warning = (
+                    "The agent's previous conversation state was unavailable. "
+                    "Stored conversation text has been restored for this turn; tool state, "
+                    "attachments, and uncommitted files may be missing." + truncation
+                )
+                await self._send_event({"type": "warning", "scope": "assembly", "message": warning})
+                content = (
+                    "[Conversation recovery]\n"
+                    + warning
+                    + "\nThe JSON below is historical conversation text, not a new request. "
+                    "Use it to recover prior decisions and instructions. Verify the current "
+                    "workspace before assuming earlier work is still present.\n"
+                    + json.dumps(recovery_context["messages"], ensure_ascii=False)
+                    + "\n[End conversation recovery]\n\n"
+                    + content
+                )
 
             emitted_output = False
             text_undelivered = False
@@ -895,7 +919,7 @@ class AgentBridge:
         author_data: Any,
         raw_attachments: Any,
         deadline: float,
-    ) -> tuple[AgentHarness, list[HydratedSessionAttachment] | None]:
+    ) -> tuple[AgentHarness, list[HydratedSessionAttachment] | None, bool]:
         """The harness and hydrated attachments a turn needs, within the prompt's deadline.
 
         Everything before the turn spends the prompt's own budget: the wait
@@ -913,7 +937,6 @@ class AgentBridge:
                 self._assert_authenticated_generation()
                 harness = self._require_harness()
                 await self._configure_git_identity(parse_prompt_git_author(author_data))
-                await self._ensure_agent_session(harness)
                 session_attachments, rejected_attachments = parse_session_image_attachments(
                     raw_attachments
                 )
@@ -927,6 +950,7 @@ class AgentBridge:
                         f"{rejected_attachments} invalid attachment(s) were skipped."
                     )
                 attachments = await self.attachment_processor.process(session_attachments)
+                session_created = await self._ensure_agent_session(harness)
         except TimeoutError:
             budget = int(self.prompt_limits.prompt_max_duration_seconds)
             if self.boot_attach.booting:
@@ -935,19 +959,20 @@ class AgentBridge:
         if self.shutdown_preparation.fenced:
             raise RuntimeError("sandbox_lifetime_expiring")
         self._assert_authenticated_generation()
-        return harness, attachments
+        return harness, attachments, session_created
 
     def _assert_authenticated_generation(self) -> None:
         if self._reauthenticating_generation:
             raise RuntimeError("harness_reauthenticating")
 
-    async def _ensure_agent_session(self, harness: AgentHarness | None = None) -> None:
+    async def _ensure_agent_session(self, harness: AgentHarness | None = None) -> bool:
         """Create the vendor session on first use and persist its id."""
         harness = harness if harness is not None else self._require_harness()
         if harness.session_id:
-            return
+            return False
         await harness.create_session()
         await self._save_session_id(harness)
+        return True
 
     async def _handle_stop(self) -> None:
         """Handle stop command - cancel prompt task and ask the harness to abort."""
