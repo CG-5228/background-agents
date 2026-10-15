@@ -92,8 +92,13 @@ async function seedCatalog(count: number): Promise<string[]> {
 }
 
 describe("managed-skill set persistence query budget", () => {
-  it("resolves and pins 9,041 skills within the invocation budget", async () => {
-    await seedCatalog(9041);
+  it.each([
+    { count: 1, queries: 7 },
+    { count: 101, queries: 7 },
+    { count: 9041, queries: 7 },
+    { count: 18082, queries: 8 },
+  ])("resolves and pins $count skills with $queries statements", async ({ count, queries }) => {
+    await seedCatalog(count);
     const budget = withQueryBudget(engine);
     const manifest = await resolveManagedSkills(
       budget.db,
@@ -101,7 +106,7 @@ describe("managed-skill set persistence query budget", () => {
       { mode: "all" },
       "user_1"
     );
-    expect(manifest.skills).toHaveLength(9041);
+    expect(manifest.skills).toHaveLength(count);
     const session = {
       id: "wide",
       title: null,
@@ -119,15 +124,15 @@ describe("managed-skill set persistence query budget", () => {
     };
     const sessions = new SessionIndexStore(budget.db);
     await sessions.create(session);
-    expect(budget.queries()).toBeLessThanOrEqual(10);
+    expect(budget.queries()).toBe(queries);
     const pinned = await new SessionSkillStore(engine).getSessionSkillsView("wide");
     expect(pinned?.skills.map((skill) => skill.skillId)).toEqual(
       manifest.skills.map((s) => s.skillId)
     );
     expect(pinned?.skills[0].assignmentSources).toEqual(manifest.skills[0].assignmentSources);
 
-    // The invalid revision is in the final payload chunk. Earlier rows, the
-    // manifest header and session row must all roll back together.
+    // The invalid revision is in the final payload chunk. The largest case
+    // spans multiple chunks; earlier rows and both headers must roll back.
     await expect(
       sessions.create({
         ...session,
@@ -151,13 +156,20 @@ describe("managed-skill set persistence query budget", () => {
     }
   });
 
-  it("validates and persists a 33,251-member profile within the invocation budget", async () => {
-    const ids = await seedCatalog(33251);
-    const budget = withQueryBudget(engine);
-    const profile = await new SkillProfileStore(budget.db).create("user_1", "Everything", ids);
-    expect(budget.queries()).toBeLessThanOrEqual(10);
-    expect((await new SkillProfileStore(engine).getOwned(profile.id, "user_1"))?.skillIds).toEqual(
-      ids
-    );
-  });
+  it.each([
+    { count: 1, queries: 4 },
+    { count: 101, queries: 4 },
+    { count: 33251, queries: 5 },
+  ])(
+    "validates and persists $count profile members with $queries statements",
+    async ({ count, queries }) => {
+      const ids = await seedCatalog(count);
+      const budget = withQueryBudget(engine);
+      const profile = await new SkillProfileStore(budget.db).create("user_1", "Everything", ids);
+      expect(budget.queries()).toBe(queries);
+      expect(
+        (await new SkillProfileStore(engine).getOwned(profile.id, "user_1"))?.skillIds
+      ).toEqual(ids);
+    }
+  );
 });

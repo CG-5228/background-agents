@@ -17,9 +17,9 @@ import {
 import { generateId } from "../auth/crypto";
 import { buildValidatedSkillRevision } from "../skills/content-addressing";
 import { isUniqueConstraintError } from "./errors";
-import { idListBatches } from "./id-list";
 import { MAX_D1_QUERY_PARAMETERS } from "./query-limits";
 import type { SqlDatabase, SqlStatement } from "./sql-database";
+import { idListBatches } from "./id-list";
 
 const RESERVED_SKILL_NAMES = new Set([
   "agent-browser",
