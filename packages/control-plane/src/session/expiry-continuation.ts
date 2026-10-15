@@ -1,3 +1,5 @@
+import { callbackContextSchema } from "@open-inspect/shared/types/session-api";
+import type { MessageRow } from "./types";
 import { MAX_UNFINISHED_PROMPTS } from "@open-inspect/shared/types/prompts";
 import { isSessionPromptable } from "@open-inspect/shared/types/session-activity";
 import { parsePersistedSandboxSettings } from "../sandbox/settings";
@@ -42,6 +44,18 @@ export class ExpiryContinuation {
     }
   }
 
+  private canContinueMessage(message: MessageRow): boolean {
+    if (!message.callback_context) return true;
+    try {
+      const callback = callbackContextSchema.safeParse(JSON.parse(message.callback_context));
+      // Its failure callback terminates the scheduler run. A synthetic prompt
+      // cannot inherit that run's overlap/admission accounting.
+      return callback.success && callback.data.source !== "automation";
+    } catch {
+      return false;
+    }
+  }
+
   plan(
     state: ShutdownRecord,
     messageId: string,
@@ -58,6 +72,7 @@ export class ExpiryContinuation {
       now - lastHeartbeat > DEFAULT_HEARTBEAT_CONFIG.timeoutMs ||
       !message ||
       message.status !== "processing" ||
+      !this.canContinueMessage(message) ||
       message.started_at === null ||
       now - message.started_at >= this.getExecutionTimeoutMs() ||
       !this.events.hasRecentExecutionProgress(
@@ -82,7 +97,8 @@ export class ExpiryContinuation {
       return { ...state, continuation: undefined };
     }
     const source = this.messages.getMessageById(continuation.sourceMessageId);
-    if (!source || source.status !== "failed") return { ...state, continuation: undefined };
+    if (!source || source.status !== "failed" || !this.canContinueMessage(source))
+      return { ...state, continuation: undefined };
     this.messages.createMessage({
       id: continuation.messageId,
       authorId: source.author_id,
@@ -92,6 +108,7 @@ export class ExpiryContinuation {
       reasoningEffort: source.reasoning_effort,
       originContext: source.origin_context,
       status: "pending",
+      prioritize: true,
       createdAt: now,
     });
     return {

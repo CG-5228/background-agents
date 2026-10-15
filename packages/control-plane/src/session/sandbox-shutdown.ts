@@ -341,7 +341,7 @@ export class SandboxShutdownCoordinator {
   }
 
   runtimeReady(version?: 1, conversationId?: string | null): void {
-    const state = this.deps.store.read();
+    const state = this.normalizeInterruptedRestore();
     if (!state || !this.current(state)) return;
     let next = { ...state, runtimeReady: true, protocolVersion: version };
     if (
@@ -498,6 +498,21 @@ export class SandboxShutdownCoordinator {
       return false;
     if (this.current(state) && this.matches(state, generation))
       this.deps.store.write({ ...state, providerObjectId: source });
+    this.holdFailedRecovery(error, generation);
+    return true;
+  }
+
+  /** Settle only the automatic message; later user work waits for explicit recovery. */
+  holdFailedContinuationBoot(error: string, generation: SandboxGeneration): boolean {
+    const state = this.deps.store.read();
+    if (
+      !state?.receipt ||
+      !state.continuation?.enqueued ||
+      !this.current(state) ||
+      !this.matches(state, generation) ||
+      this.deps.messages.getMessageStatus(state.continuation.messageId) !== "pending"
+    )
+      return false;
     this.holdFailedRecovery(error, generation);
     return true;
   }
@@ -1452,7 +1467,14 @@ export class SandboxShutdownCoordinator {
   }
 
   private normalizeInterruptedRestore(): ShutdownRecord | null {
-    const state = this.deps.store.read();
+    let state = this.deps.store.read();
+    if (state?.continuation?.enqueued) {
+      const status = this.deps.messages.getMessageStatus(state.continuation.messageId);
+      if (status !== "pending" && status !== "processing") {
+        state = { ...state, continuation: undefined };
+        this.publish(state);
+      }
+    }
     if (
       (state?.phase !== "restoring" && state?.phase !== "running") ||
       !state.restoreInvoked ||
@@ -1646,7 +1668,7 @@ export class SandboxShutdownCoordinator {
     this.deps.retireAccess();
     this.announce(saved);
     this.broadcast({ type: "sandbox_status", status: "stopped" });
-    this.notifyLifecycleChange();
+    this.notifyLifecycleChange(saved.continuation?.enqueued === true);
   }
 
   private fail(
@@ -1662,6 +1684,7 @@ export class SandboxShutdownCoordinator {
       failed.continuationPaused = true;
     }
     this.publish(failed);
+    if (state.continuation?.enqueued) this.notifyLifecycleChange(true);
     this.broadcast({
       type: "sandbox_warning",
       message: `${phase === "failed" ? "Sandbox save failed" : "Sandbox save could not be confirmed"}: ${error}`,
@@ -1739,10 +1762,14 @@ export class SandboxShutdownCoordinator {
     return state.continuationPaused ?? state.messageId !== undefined;
   }
 
-  private notifyLifecycleChange(): void {
-    this.deps.background.submit(() => this.deps.onLifecycleChange(), {
-      name: "sandbox.lifecycle_change",
-    });
+  private notifyLifecycleChange(reconcileStatus = false): void {
+    this.deps.background.submit(
+      async () => {
+        if (reconcileStatus) await this.deps.reconcileStatusFromMessages();
+        await this.deps.onLifecycleChange();
+      },
+      { name: "sandbox.lifecycle_change" }
+    );
   }
 
   private kickAdvance(): void {

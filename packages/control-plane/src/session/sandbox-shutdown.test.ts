@@ -364,6 +364,94 @@ describe("SandboxShutdownCoordinator", () => {
       expect(f.deps.messages.createMessage).toHaveBeenCalledOnce();
     });
 
+    it("releases admission when the web continuation is canceled during restore", async () => {
+      const f = automaticFixture();
+      await drain(f);
+      await save(f);
+      const id = f.store.value!.continuation!.messageId;
+      const generation = { sandboxId: "replacement", createdAt: 800_000 };
+      f.shutdown.reserveStartup(generation.createdAt, "confirmed", () => {
+        f.sandboxRow.modal_sandbox_id = generation.sandboxId;
+        f.sandboxRow.created_at = generation.createdAt;
+      });
+      f.shutdown.markRecoveryInvoked(generation);
+      // cancelPendingMessage deletes web-origin messages without callbacks.
+      f.messages.delete(id);
+      f.shutdown.runtimeReady(1, "vendor-conversation");
+      await f.shutdown.recordProviderStartup(generation, {
+        kind: "finite",
+        expiresAtMs: 8_000_000,
+        observedAtMs: 800_000,
+        source: "provider",
+      });
+      f.shutdown.generationReady({
+        type: "sandbox_generation_ready",
+        generation,
+        sandboxId: generation.sandboxId,
+        timestamp: 800,
+      });
+      expect(f.shutdown.admissionDecision()).toBe("ready");
+      expect(f.store.value?.continuation).toBeUndefined();
+      expect(f.store.value?.automaticHandoffs).toBe(1);
+      expect(f.source.status).toBe("failed");
+    });
+
+    it("reconciles a single-task session before dispatching its inserted continuation", async () => {
+      const f = automaticFixture();
+      await drain(f);
+      for (const task of f.backgroundTasks.splice(0)) await task();
+      f.session.status = "failed";
+      f.deps.reconcileStatusFromMessages.mockImplementation(async () => {
+        if ([...f.messages.values()].some((m) => m.status === "pending"))
+          f.session.status = "active";
+      });
+      f.deps.onLifecycleChange.mockImplementation(async () => {
+        if (f.shutdown.pendingContinuationMessageId()) expect(f.session.status).toBe("active");
+      });
+      await save(f);
+      for (const task of f.backgroundTasks) await task();
+      expect(f.session.status).toBe("active");
+    });
+
+    it.each(["web", "automation"] as const)(
+      "keeps scheduler-owned %s prompts under manual recovery",
+      async (source) => {
+        const f = automaticFixture();
+        f.source.source = source;
+        f.source.callback_context = JSON.stringify({
+          source: "automation",
+          automationId: "job",
+          runId: "run",
+          automationName: "Job",
+        });
+        await drain(f);
+        expect(f.store.value?.continuation).toBeUndefined();
+        await save(f);
+        expect(f.deps.messages.createMessage).not.toHaveBeenCalled();
+        expect(f.source.status).toBe("failed");
+        expect(f.store.value?.continuationPaused).toBe(true);
+      }
+    );
+
+    it("allows automation follow-ups without a run-owning callback", async () => {
+      const f = automaticFixture();
+      f.source.source = "automation";
+      f.source.callback_context = null;
+      await drain(f);
+      await save(f);
+      expect(f.deps.messages.createMessage).toHaveBeenCalledOnce();
+    });
+
+    it.each(["{broken", JSON.stringify({ source: "automation", runId: "unverified" })])(
+      "holds prompts with an unverifiable callback (%s)",
+      async (callback) => {
+        const f = automaticFixture();
+        f.source.callback_context = callback;
+        await drain(f);
+        expect(f.store.value?.continuation).toBeUndefined();
+      }
+    );
+
     it.each([
       "opt-out",
       "stalled",

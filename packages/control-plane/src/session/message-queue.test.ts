@@ -138,8 +138,7 @@ it("creates a canonical SHA-256 web prompt fingerprint", async () => {
 
 function buildQueue(
   mayDispatch: () => boolean = () => true,
-  getSandboxPromptBlockReason: () => string | null = () => null,
-  getPriorityMessageId: () => string | null = () => null
+  getSandboxPromptBlockReason: () => string | null = () => null
 ) {
   // Mutable so tests can pin that the deadline honors the value current at
   // dispatch time — the thunk exists because settings can be persisted after
@@ -307,8 +306,7 @@ function buildQueue(
     executionStop,
     () => executionTimeoutMs,
     mayDispatch,
-    getSandboxPromptBlockReason,
-    getPriorityMessageId
+    getSandboxPromptBlockReason
   );
 
   return {
@@ -2596,14 +2594,9 @@ describe("SessionMessageQueue", () => {
 
 describe("expiry continuation queue ordering", () => {
   it("dispatches the restored task before later queued prompts", async () => {
-    const h = buildQueue(
-      () => true,
-      () => null,
-      () => "continuation"
-    );
+    const h = buildQueue();
     h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
-    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "queued-user" }));
-    h.repository.getMessageById.mockReturnValue(
+    h.repository.getNextPendingMessage.mockReturnValue(
       createMessage({ id: "continuation", content: "Continue saved work" })
     );
     await h.queue.processMessageQueue();
@@ -2615,11 +2608,7 @@ describe("expiry continuation queue ordering", () => {
   });
 
   it("leaves queued work held until restored context is admitted", async () => {
-    const h = buildQueue(
-      () => false,
-      () => null,
-      () => "continuation"
-    );
+    const h = buildQueue(() => false);
     h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
     h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "queued-user" }));
     await h.queue.processMessageQueue();
@@ -2627,11 +2616,7 @@ describe("expiry continuation queue ordering", () => {
   });
 
   it("dispatches normal queued work after the continuation has finished", async () => {
-    const h = buildQueue(
-      () => true,
-      () => null,
-      () => null
-    );
+    const h = buildQueue();
     h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
     h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "queued-user" }));
     await h.queue.processMessageQueue();

@@ -208,6 +208,7 @@ export interface SessionRuntime {
  * consumes it — everything else stays local to the factory.
  */
 export interface SessionComponents {
+  statusService: SessionStatusService;
   sandboxRepository: SandboxRepository;
   wsManager: SessionWebSocketManager;
   /**
@@ -570,8 +571,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     executionStop,
     getExecutionTimeoutMs,
     () => lifecycleManager.mayProcessQueuedWork(),
-    () => sandboxPromptBlockReason(lifecycleManager.shutdownSnapshot()),
-    () => shutdown.pendingContinuationMessageId()
+    () => sandboxPromptBlockReason(lifecycleManager.shutdownSnapshot())
   );
 
   // Tier 7 — services over the queue and lifecycle.
@@ -1056,6 +1056,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   });
 
   const components: SessionComponents = {
+    statusService,
     sandboxRepository,
     wsManager,
     // Accessor pair over the local cell: production reads never go through

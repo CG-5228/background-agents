@@ -610,7 +610,10 @@ execution or spending.
 Only a prompt still within its execution budget, with a fresh sandbox heartbeat and execution
 progress recorded within the normal inactivity window, qualifies. Heartbeats alone do not qualify.
 This is a conservative activity check, not a proof of useful work; a legitimate long silent command
-may require manual recovery.
+may require manual recovery. Prompts with a validated automation run callback require manual
+recovery: their failure settles the scheduler-owned run, so they cannot continue outside its
+admission and overlap accounting. Automation follow-ups without a run-owning callback remain
+eligible. Unverifiable callback contexts also require manual recovery.
 
 The interrupted prompt remains **failed**, with its normal failure event and callback. After
 confirmed runtime shutdown, conversation-ID persistence, workspace preservation, and source
