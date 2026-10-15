@@ -20,13 +20,19 @@ import {
   updateAutomationRequestSchema,
 } from "@open-inspect/shared/types/automations";
 import type { ModelProviderSelections } from "@open-inspect/shared/types/provider-accounts";
-import type { PermissionId } from "@open-inspect/shared/rbac";
 import {
   checkHarnessCompatibility,
   getValidHarnessOrDefault,
   selectedProviderAuthModes,
+  selectHarnessProviderSelections,
 } from "@open-inspect/shared/harnesses";
-import { getValidModelOrDefault, isValidModel } from "@open-inspect/shared/models";
+import {
+  HarnessAdmissionError,
+  resolveHarnessSelection,
+  resolveHarnessAutomationUpdate,
+  validateHarnessAutomationAuth,
+} from "../harness-admission";
+import { isValidModel, normalizeModelId } from "@open-inspect/shared/models";
 import {
   AutomationStore,
   parseAutomationTriggerFields,
@@ -34,6 +40,8 @@ import {
   type AutomationRepositoryInsert,
 } from "../db/automation-store";
 import { SlackChannelStore } from "../db/slack-channel-store";
+import { resolveCreationOwnerTeam } from "./team-ownership";
+import { resourceViewer } from "../authorization/resource-viewer";
 import {
   AutomationModelProviderAuthStore,
   toProviderSelections,
@@ -48,7 +56,6 @@ import {
   requireAdmittedCanonicalUserId,
 } from "../routing/identity-enforcement";
 import { generateWebhookApiKey, hashApiKey, encryptSentrySecret } from "../auth/webhook-key";
-import { hydrateAutomation } from "../automation/hydrate";
 import { Hono } from "hono";
 import { admit, dispatch } from "../routing/admit";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
@@ -57,14 +64,20 @@ import {
   GITHUB_USER_OR_SERVICE_ROUTE,
   json,
   error,
-  requirePermission,
+  permissionRequirement,
+  requireAll,
 } from "./shared";
 import { parseJsonBody } from "./body";
 import type { Env } from "../types";
 import type { SqlDatabase, SqlStatement } from "../db/sql-database";
 import { ProviderAccountSelectionPolicyError } from "../model-provider-accounts/selection-policy";
 import { createLogger } from "../logger";
-import { AUTOMATIONS_READ, AUTOMATION_MANAGE, admittedAutomation } from "./automation-shared";
+import {
+  AUTOMATION_READ,
+  AUTOMATION_MANAGE,
+  admittedAutomation,
+  hydrateAutomationResponse,
+} from "./automation-shared";
 import {
   type CreateAutomationBody,
   FAR_FUTURE_THRESHOLD_MS,
@@ -75,13 +88,15 @@ import {
   getEnvironmentSelection,
   getRepositorySelection,
   getTriggerEventTypeError,
-  requireTargetPermissions,
   resolveEnvironmentSelection,
-  resolveReasoningEffort,
   resolveRepositorySelection,
   validateSlackTriggerConfig,
   validateTargetCounts,
+  validateTeamExecutor,
 } from "./automation-validation";
+import { isAutomationExecutionAuthorized } from "../automation/authorization-guard";
+import { authorizeSessionTarget } from "./session-target-authorization";
+import { authorizeTeamRepositories } from "./workspace-repository-authorization";
 
 const logger = createLogger("router:automations");
 
@@ -128,6 +143,19 @@ async function handleCreateAutomation(
     );
   }
 
+  // The scheduler replays only the canonical subject admitted before RBAC.
+  const resolution = requireAdmittedCanonicalUserId(ctx, enforced);
+  if (resolution instanceof Response) return resolution;
+  const resolvedUserId = resolution;
+  const ownerTeam = await resolveCreationOwnerTeam(ctx, body.teamId ?? null);
+  if (ownerTeam instanceof Response) return ownerTeam;
+  const ownerTeamId = ownerTeam?.id ?? null;
+  if (ownerTeamId !== null) {
+    const executorError = await validateTeamExecutor(ctx.db, ownerTeamId, resolvedUserId);
+    if (executorError) return executorError;
+  }
+  const viewer = await resourceViewer(ctx);
+
   const selection = getRepositorySelection(body);
   const requestedRepositories = selection.kind === "replace" ? selection.repositories : [];
 
@@ -151,20 +179,32 @@ async function handleCreateAutomation(
       environmentSelection.kind === "replace" ? environmentSelection.environmentIds : [];
     validateTargetCounts(triggerType, requestedRepositories.length, requestedEnvironmentIds.length);
   } catch (e) {
-    if (e instanceof TargetSelectionError) return error(e.message, 400);
+    if (e instanceof TargetSelectionError) return e.response();
     throw e;
   }
-  if (ctx.principal?.kind === "user") {
-    const targetAuthorizationError = requireTargetPermissions(ctx, [
-      ...(requestedRepositories.length > 0 ? (["repositories.use"] as const) : []),
-      ...(requestedEnvironmentIds.length > 0 ? (["environments.use"] as const) : []),
-    ]);
-    if (targetAuthorizationError) return targetAuthorizationError;
-  }
+  const repositoryAuthorizationError = await authorizeSessionTarget(ctx, {
+    teamId: null,
+    repositories: requestedRepositories.map((repository) => ({
+      owner: repository.repoOwner,
+      name: repository.repoName,
+    })),
+  });
+  if (repositoryAuthorizationError) return repositoryAuthorizationError;
+  const environmentAuthorizationError = await authorizeSessionTarget(ctx, {
+    teamId: null,
+    environmentId: requestedEnvironmentIds[0],
+  });
+  if (environmentAuthorizationError) return environmentAuthorizationError;
+  let environmentRepositories;
   try {
-    await resolveEnvironmentSelection(ctx.db, requestedEnvironmentIds);
+    environmentRepositories = await resolveEnvironmentSelection(
+      ctx.db,
+      requestedEnvironmentIds,
+      ownerTeamId,
+      viewer
+    );
   } catch (e) {
-    if (e instanceof TargetSelectionError) return error(e.message, 400);
+    if (e instanceof TargetSelectionError) return e.response();
     throw e;
   }
 
@@ -206,25 +246,58 @@ async function handleCreateAutomation(
       ...body.triggerConfig!,
       conditions: normalizeSlackChannelConditions(body.triggerConfig!.conditions),
     };
+    if (
+      !(await new SlackChannelStore(ctx.db).hasCompatibleBindings(
+        extractSlackChannels(body.triggerConfig),
+        ownerTeamId
+      ))
+    ) {
+      return json(
+        {
+          error: "Slack channels must belong to the automation's team",
+          code: "channel_team_mismatch",
+        },
+        409
+      );
+    }
   }
 
   // Validate harness and model
   const harness = getValidHarnessOrDefault(body.harness);
-  const model = getValidModelOrDefault(body.model);
-  const harnessIncompatibility = checkHarnessCompatibility(harness, model);
-  if (harnessIncompatibility) return error(harnessIncompatibility.message, 400);
-  const reasoningEffort = resolveReasoningEffort(model, body.reasoningEffort);
+  let harnessSelection;
+  try {
+    harnessSelection = await resolveHarnessSelection(ctx.db, env, {
+      harness,
+      model: body.model,
+      reasoningEffort: body.reasoningEffort,
+    });
+  } catch (cause) {
+    if (cause instanceof HarnessAdmissionError) return error(cause.message, cause.status);
+    throw cause;
+  }
+  const { model, reasoningEffort } = harnessSelection;
   if (body.reasoningEffort !== undefined && body.reasoningEffort !== null && !reasoningEffort) {
     return error("Invalid reasoning effort for selected model", 400);
   }
 
-  const newRepositories = await resolveRepositorySelection(env, requestedRepositories, ctx);
+  const newRepositories = await resolveRepositorySelection(
+    env,
+    requestedRepositories,
+    ctx,
+    ownerTeamId
+  );
+  if (newRepositories instanceof Response) return newRepositories;
+  const environmentGrantError = await authorizeTeamRepositories(ctx, {
+    teamId: ownerTeamId,
+    repositories: environmentRepositories,
+  });
+  if (environmentGrantError) return environmentGrantError;
 
   let providerSelections: ModelProviderSelections;
   try {
     providerSelections = await parseAndValidateAutomationProviderSelections(
       ctx.db,
-      body.providerSelections ?? {}
+      selectHarnessProviderSelections(harness, body.providerSelections ?? {})
     );
   } catch (e) {
     if (e instanceof AutomationProviderSelectionError) return error(e.message, 400);
@@ -239,6 +312,16 @@ async function handleCreateAutomation(
     selectedProviderAuthModes(providerSelections)
   );
   if (harnessAuthIncompatibility) return error(harnessAuthIncompatibility.message, 400);
+  try {
+    await validateHarnessAutomationAuth(ctx.db, harness, model, providerSelections);
+  } catch (cause) {
+    if (
+      cause instanceof HarnessAdmissionError ||
+      cause instanceof ProviderAccountSelectionPolicyError
+    )
+      return error(cause.message, cause.status);
+    throw cause;
+  }
 
   // Compute next run (only for schedule triggers)
   const nextRunAt = isSchedule
@@ -265,17 +348,11 @@ async function handleCreateAutomation(
     triggerAuthData = await encryptSentrySecret(sentrySecret, env.REPO_SECRETS_ENCRYPTION_KEY);
   }
 
-  // The scheduler replays user_id as session identity at fire time, so the
-  // handler may consume only the canonical subject admitted before RBAC.
-  const resolution = requireAdmittedCanonicalUserId(ctx, enforced);
-  if (resolution instanceof Response) return resolution;
-  const resolvedUserId = resolution;
-
   const db: SqlDatabase = ctx.db;
   const store = new AutomationStore(db);
   const providerAuthStore = new AutomationModelProviderAuthStore(db);
   const row: AutomationRow = {
-    owner_team_id: null,
+    owner_team_id: ownerTeamId,
     id,
     name: body.name.trim(),
     instructions: body.instructions,
@@ -316,7 +393,7 @@ async function handleCreateAutomation(
   }
   await ctx.db.batch(createStatements);
 
-  const automation = await hydrateAutomation(db, (await store.getById(id))!);
+  const automation = await hydrateAutomationResponse(ctx, (await store.getById(id))!, viewer);
 
   logger.info("automation.created", {
     event: "automation.created",
@@ -359,13 +436,8 @@ async function handleGetAutomation(
   params: { id: string },
   ctx: RequestContext
 ): Promise<Response> {
-  const id = params.id;
-
-  const store = new AutomationStore(ctx.db);
-  const row = await store.getById(id);
-  if (!row) return error("Automation not found", 404);
-
-  return json({ automation: await hydrateAutomation(ctx.db, row) });
+  const { automation, viewer } = admittedAutomation(ctx);
+  return json({ automation: await hydrateAutomationResponse(ctx, automation, viewer) });
 }
 
 async function handleUpdateAutomation(
@@ -417,7 +489,10 @@ async function handleUpdateAutomation(
     try {
       replacementProviderSelections = await parseAndValidateAutomationProviderSelections(
         ctx.db,
-        body.providerSelections
+        selectHarnessProviderSelections(
+          getValidHarnessOrDefault(body.harness ?? existing.harness),
+          body.providerSelections
+        )
       );
     } catch (e) {
       if (e instanceof AutomationProviderSelectionError) return error(e.message, 400);
@@ -461,29 +536,60 @@ async function handleUpdateAutomation(
     return error("Invalid model", 400);
   }
 
-  const nextModel = body.model !== undefined ? getValidModelOrDefault(body.model) : existing.model;
-  const nextHarness =
-    body.harness !== undefined ? body.harness : getValidHarnessOrDefault(existing.harness);
+  const storedHarness = getValidHarnessOrDefault(existing.harness);
+  const nextHarness = body.harness !== undefined ? body.harness : storedHarness;
+  const storedProviderSelections = toProviderSelections(await providerAuthStore.list(id));
+  // Execution changes are judged against the stored configuration, not by which
+  // fields were sent: the edit form always resubmits them unchanged.
+  const harnessChanged = nextHarness !== storedHarness;
+  const modelChanged = body.model !== undefined && normalizeModelId(body.model) !== existing.model;
+  const executionChanged =
+    harnessChanged ||
+    modelChanged ||
+    (body.reasoningEffort !== undefined &&
+      (body.reasoningEffort ?? null) !== existing.reasoning_effort) ||
+    (replacementProviderSelections !== null &&
+      !sameProviderSelections(replacementProviderSelections, storedProviderSelections));
   // The selections the automation will have after this write: the replacement
-  // when one is given, else the stored pins whenever harness or model moves.
+  // when one is given, else the stored pins whenever the execution changes.
   const nextProviderSelections =
-    replacementProviderSelections ??
-    (body.harness !== undefined || body.model !== undefined
-      ? toProviderSelections(await providerAuthStore.list(id))
-      : null);
+    replacementProviderSelections ?? (executionChanged ? storedProviderSelections : null);
+  const requestedReasoningEffort = body.reasoningEffort;
+  let updatedSelection;
+  try {
+    updatedSelection = await resolveHarnessAutomationUpdate(
+      ctx.db,
+      env,
+      { model: existing.model, reasoningEffort: existing.reasoning_effort },
+      {
+        harness: nextHarness,
+        model: body.model,
+        reasoningEffort: body.reasoningEffort,
+        executionChanged,
+      }
+    );
+    if (executionChanged)
+      await validateHarnessAutomationAuth(
+        ctx.db,
+        nextHarness,
+        updatedSelection.model,
+        nextProviderSelections ?? {}
+      );
+  } catch (cause) {
+    if (
+      cause instanceof HarnessAdmissionError ||
+      cause instanceof ProviderAccountSelectionPolicyError
+    )
+      return error(cause.message, cause.status);
+    throw cause;
+  }
+  const { model: nextModel, reasoningEffort: resolvedReasoningEffort } = updatedSelection;
   const harnessIncompatibility = checkHarnessCompatibility(
     nextHarness,
     nextModel,
     nextProviderSelections ? selectedProviderAuthModes(nextProviderSelections) : undefined
   );
   if (harnessIncompatibility) return error(harnessIncompatibility.message, 400);
-  const requestedReasoningEffort = body.reasoningEffort;
-  const resolvedReasoningEffort =
-    requestedReasoningEffort !== undefined
-      ? resolveReasoningEffort(nextModel, requestedReasoningEffort)
-      : body.model !== undefined && existing.reasoning_effort !== null
-        ? resolveReasoningEffort(nextModel, existing.reasoning_effort)
-        : existing.reasoning_effort;
 
   if (
     requestedReasoningEffort !== undefined &&
@@ -501,7 +607,8 @@ async function handleUpdateAutomation(
   if (body.scheduleTz !== undefined) updateFields.schedule_tz = body.scheduleTz;
   if (body.harness !== undefined) updateFields.harness = nextHarness;
   if (body.model !== undefined) updateFields.model = nextModel;
-  if (body.reasoningEffort !== undefined || body.model !== undefined) {
+  // A harness switch can invalidate the stored effort just like a model change.
+  if (body.reasoningEffort !== undefined || body.model !== undefined || harnessChanged) {
     updateFields.reasoning_effort = resolvedReasoningEffort;
   }
 
@@ -511,18 +618,23 @@ async function handleUpdateAutomation(
   // it simply applies from the next invocation.
   const selection = getRepositorySelection(body);
   const environmentSelection = getEnvironmentSelection(body);
-  const requiredTargetPermissions: PermissionId[] = [
-    ...(selection.kind === "replace" && selection.repositories.length > 0
-      ? (["repositories.use"] as const)
-      : []),
-    ...(environmentSelection.kind === "replace" && environmentSelection.environmentIds.length > 0
-      ? (["environments.use"] as const)
-      : []),
-  ];
-  if (requiredTargetPermissions.length > 0) {
-    const targetAuthorizationError = requireTargetPermissions(ctx, requiredTargetPermissions);
-    if (targetAuthorizationError) return targetAuthorizationError;
-  }
+  const repositoryAuthorizationError = await authorizeSessionTarget(ctx, {
+    teamId: null,
+    repositories:
+      selection.kind === "replace"
+        ? selection.repositories.map((repository) => ({
+            owner: repository.repoOwner,
+            name: repository.repoName,
+          }))
+        : undefined,
+  });
+  if (repositoryAuthorizationError) return repositoryAuthorizationError;
+  const environmentAuthorizationError = await authorizeSessionTarget(ctx, {
+    teamId: null,
+    environmentId:
+      environmentSelection.kind === "replace" ? environmentSelection.environmentIds[0] : undefined,
+  });
+  if (environmentAuthorizationError) return environmentAuthorizationError;
 
   // The count rules span both selections, so when EITHER is replaced they are
   // validated against the automation's FINAL state (the replacement plus the
@@ -533,25 +645,69 @@ async function handleUpdateAutomation(
   const replacementEnvironmentIds: string[] | null =
     environmentSelection.kind === "replace" ? environmentSelection.environmentIds : null;
   if (selection.kind === "replace" || replacementEnvironmentIds !== null) {
+    const finalRepositories =
+      selection.kind === "replace" ? [] : await store.getRepositoriesForAutomation(id);
+    const finalEnvironmentIds =
+      replacementEnvironmentIds ??
+      (await store.getEnvironmentsForAutomation(id)).map(
+        (environment) => environment.environment_id
+      );
+    let environmentRepositories;
     try {
       const finalRepositoryCount =
-        selection.kind === "replace"
-          ? selection.repositories.length
-          : (await store.getRepositoriesForAutomation(id)).length;
-      const finalEnvironmentCount =
+        selection.kind === "replace" ? selection.repositories.length : finalRepositories.length;
+      validateTargetCounts(existingTriggerType, finalRepositoryCount, finalEnvironmentIds.length);
+      environmentRepositories = await resolveEnvironmentSelection(
+        ctx.db,
+        finalEnvironmentIds,
+        existing.owner_team_id,
+        admission.viewer,
         replacementEnvironmentIds !== null
-          ? replacementEnvironmentIds.length
-          : (await store.getEnvironmentsForAutomation(id)).length;
-      validateTargetCounts(existingTriggerType, finalRepositoryCount, finalEnvironmentCount);
-      if (replacementEnvironmentIds !== null) {
-        await resolveEnvironmentSelection(ctx.db, replacementEnvironmentIds);
-      }
+      );
     } catch (e) {
-      if (e instanceof TargetSelectionError) return error(e.message, 400);
+      if (e instanceof TargetSelectionError) return e.response();
       throw e;
     }
     if (selection.kind === "replace") {
-      replacementRepositories = await resolveRepositorySelection(env, selection.repositories, ctx);
+      const resolved = await resolveRepositorySelection(
+        env,
+        selection.repositories,
+        ctx,
+        existing.owner_team_id
+      );
+      if (resolved instanceof Response) return resolved;
+      replacementRepositories = resolved;
+    }
+    // Stored targets are revalidated too: grants may have been revoked since they were saved.
+    const grantError = await authorizeTeamRepositories(ctx, {
+      teamId: existing.owner_team_id,
+      repositories: [
+        ...finalRepositories.map((repository) => ({
+          owner: repository.repo_owner,
+          name: repository.repo_name,
+          repoId: repository.repo_id,
+        })),
+        ...environmentRepositories,
+      ],
+    });
+    if (grantError) return grantError;
+    // Target edits must leave the automation runnable by its current executor.
+    if (
+      !(await isAutomationExecutionAuthorized(ctx.db, {
+        automationId: id,
+        ...(existing.user_id ? { executionUserId: existing.user_id } : {}),
+        requiresRepositoryUse: (replacementRepositories ?? finalRepositories).length > 0,
+        requiresEnvironmentUse: finalEnvironmentIds.length > 0,
+      }))
+    ) {
+      return json(
+        {
+          error: "The automation's executor cannot launch these targets",
+          code: "automation_executor_unauthorized",
+          reason_code: "execution_authorization_denied",
+        },
+        409
+      );
     }
   }
 
@@ -593,6 +749,22 @@ async function handleUpdateAutomation(
       conditions: normalizeSlackChannelConditions(body.triggerConfig.conditions),
     };
     triggerConfigToValidate = body.triggerConfig;
+  }
+
+  if (
+    existingTriggerType === "slack_event" &&
+    !(await new SlackChannelStore(ctx.db).hasCompatibleBindings(
+      extractSlackChannels(body.triggerConfig ?? existingTriggerConfig ?? undefined),
+      existing.owner_team_id
+    ))
+  ) {
+    return json(
+      {
+        error: "Slack channels must belong to the automation's team",
+        code: "channel_team_mismatch",
+      },
+      409
+    );
   }
 
   if (triggerConfigToValidate) {
@@ -680,7 +852,7 @@ async function handleUpdateAutomation(
     trace_id: ctx.trace_id,
   });
 
-  return json({ automation: await hydrateAutomation(db, updated) });
+  return json({ automation: await hydrateAutomationResponse(ctx, updated, admission.viewer) });
 }
 
 async function handleDeleteAutomation(
@@ -712,11 +884,15 @@ automationCrudRoutes.post(
   "/automations",
   admit({
     ...GITHUB_USER_OR_SERVICE_ROUTE,
-    authorization: requirePermission("automations.create"),
+    // The creator becomes the executor, whose runs create sessions under its authority.
+    authorization: requireAll(
+      permissionRequirement("automations.create"),
+      permissionRequirement("sessions.create")
+    ),
   }),
   (c) => dispatch(c, handleCreateAutomation)
 );
-automationCrudRoutes.get("/automations/:id", AUTOMATIONS_READ, (c) =>
+automationCrudRoutes.get("/automations/:id", AUTOMATION_READ, (c) =>
   dispatch(c, handleGetAutomation)
 );
 automationCrudRoutes.put("/automations/:id", AUTOMATION_MANAGE, (c) =>
@@ -725,3 +901,13 @@ automationCrudRoutes.put("/automations/:id", AUTOMATION_MANAGE, (c) =>
 automationCrudRoutes.delete("/automations/:id", AUTOMATION_MANAGE, (c) =>
   dispatch(c, handleDeleteAutomation)
 );
+
+function sameProviderSelections(a: ModelProviderSelections, b: ModelProviderSelections): boolean {
+  const canonical = (selections: ModelProviderSelections) =>
+    JSON.stringify(
+      Object.entries(selections)
+        .filter(([, selection]) => selection !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+    );
+  return canonical(a) === canonical(b);
+}

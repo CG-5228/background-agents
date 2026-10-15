@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => {
     requireTeamOnCreate: false,
   };
   return {
+    userId: "user-1",
     routerPush: vi.fn(),
     toastError: vi.fn(),
     mutateMock: vi.fn(),
@@ -123,7 +124,7 @@ export const environment = {
 };
 
 vi.mock("@/lib/auth-session", () => ({
-  useAuthSession: () => ({ data: { user: { id: "user-1" } }, status: "authenticated" }),
+  useAuthSession: () => ({ data: { user: { id: mocks.userId } }, status: "authenticated" }),
 }));
 
 vi.mock("@/hooks/use-current-user-authorization", () => ({
@@ -191,6 +192,9 @@ vi.mock("@/components/model-reasoning-selector", () => ({
       </button>
       <button type="button" onClick={() => onModelChange("openai/gpt-5.4")}>
         Switch model to GPT-5.4
+      </button>
+      <button type="button" onClick={() => onModelChange("openai/gpt-6.1-sol")}>
+        Switch model to GPT-6.1
       </button>
       {onHarnessChange && (
         <>
@@ -277,6 +281,7 @@ beforeEach(() => {
   mocks.providerAccountsLoadingValue = false;
   mocks.keyboardShortcuts = DEFAULT_KEYBOARD_SHORTCUTS;
   mocks.canCreateSession = true;
+  mocks.userId = "user-1";
   mocks.activeTeamId = null;
   mocks.scope = undefined;
   mocks.teams = [];
@@ -287,6 +292,15 @@ beforeEach(() => {
   mocks.routerPush.mockReset();
   mocks.toastError.mockReset();
   mocks.mutateMock.mockReset();
+  // Radix Checkbox measures itself via ResizeObserver, which jsdom lacks.
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  );
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
@@ -308,6 +322,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  sessionStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });

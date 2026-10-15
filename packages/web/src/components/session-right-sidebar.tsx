@@ -27,6 +27,7 @@ import type { DiffSelection } from "@/lib/session-diffs";
 import { deriveSessionDiffView } from "@/lib/session-diffs";
 import { DiffRetryNotice } from "@/components/diff-retry-notice";
 import { ManagedSkillsSection } from "./sidebar/managed-skills-section";
+import { MemoriesSection } from "./sidebar/memories-section";
 import { BudgetSection } from "./sidebar/budget-section";
 import { DetailsSection } from "./sidebar/details-section";
 import type { SessionCapabilities } from "@/lib/session-capabilities";
@@ -40,6 +41,7 @@ import { sessionActionErrorMessage } from "@/lib/session-action-error";
 import { toast } from "sonner";
 import type { SessionScopeControls } from "@/lib/session-scope";
 import { SessionVisibilityControl } from "./session-visibility-control";
+import { SessionScopeRefreshNotice } from "./session-scope-provider";
 import { CollaboratorsSection } from "./sidebar/collaborators-section";
 
 interface SessionRightSidebarProps {
@@ -71,8 +73,8 @@ const DEFAULT_CAN_MANAGE_BUDGET = false;
 const TRACE_DOWNLOAD_TIMEOUT_MS = 60_000;
 
 const INSPECTOR_TAB_LABELS: Record<SessionInspectorTab, string> = {
-  changes: "Changes",
   info: "Info",
+  changes: "Changes",
   tasks: "Tasks",
   tools: "Tools",
 };
@@ -226,7 +228,7 @@ export function SessionRightSidebarContent({
         ))}
       </TabsList>
 
-      {/* Canonical durable checkout changes, plus media the agent captured */}
+      {/* Canonical durable checkout changes */}
       <InspectorPanel value="changes" activeTab={activeTab}>
         <div className="mb-5">
           <h3 className="text-sm font-semibold">Files changed</h3>
@@ -288,17 +290,6 @@ export function SessionRightSidebarContent({
             />
           )}
         </div>
-        {mediaArtifacts.length > 0 && (
-          <div className="mt-5">
-            <CollapsibleSection title={`Media (${mediaArtifacts.length})`} defaultOpen={true}>
-              <MediaSection
-                sessionId={sessionId}
-                mediaArtifacts={mediaArtifacts}
-                onOpenMedia={onOpenMedia}
-              />
-            </CollapsibleSection>
-          </div>
-        )}
       </InspectorPanel>
 
       <InspectorPanel value="info" activeTab={activeTab} className="space-y-6">
@@ -328,15 +319,27 @@ export function SessionRightSidebarContent({
                 totalCost={sessionState.totalCost ?? 0}
                 maxSessionCostUsd={sessionState.maxSessionCostUsd}
                 canManageBudget={canManageBudget}
+                harness={sessionState.harness}
               />
             </MetadataSection>
-            {scope && capabilities.changeVisibility && (
+            {/* Media the agent captured */}
+            {mediaArtifacts.length > 0 && (
+              <CollapsibleSection title={`Artifacts (${mediaArtifacts.length})`}>
+                <MediaSection
+                  sessionId={sessionId}
+                  mediaArtifacts={mediaArtifacts}
+                  onOpenMedia={onOpenMedia}
+                />
+              </CollapsibleSection>
+            )}
+            {scope && (
               <SessionVisibilityControl
                 {...scope}
                 sessionId={sessionId}
                 canChangeVisibility={capabilities.changeVisibility}
               />
             )}
+            {scope && <SessionScopeRefreshNotice />}
             {scope?.visibility === "private" && capabilities.manageCollaborators && (
               <CollaboratorsSection
                 {...scope}
@@ -345,6 +348,7 @@ export function SessionRightSidebarContent({
               />
             )}
             <ManagedSkillsSection sessionId={sessionState.id} />
+            <MemoriesSection sessionId={sessionState.id} />
             {(!presenceSynced || participants.length > 0) && (
               <DetailsSection title="Participants">
                 <ParticipantsSection participants={participants} presenceSynced={presenceSynced} />

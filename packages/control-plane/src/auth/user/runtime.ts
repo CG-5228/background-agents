@@ -14,7 +14,6 @@ import { GitHubProviderIdentityResolver } from "./providers/github-identity";
 import { GitHubSignInProfileResolver } from "./providers/github-profile";
 import { GoogleSignInProfileResolver } from "./providers/google-profile";
 import { SignInClaim } from "./sign-in-claim";
-import { redirectSignInFailures } from "./sign-in-failure";
 import { IdentityClaimStore } from "../../db/identity-claim-store";
 import type { SqlDatabase } from "../../db/sql-database";
 import type { Env } from "../../types";
@@ -197,34 +196,21 @@ function withClaim(
   };
 }
 
-function withFailureRedirect(
-  provider: SignInProvider,
-  config: SocialProviderAuthConfig | undefined
-): SocialProviderAuthConfig | undefined {
-  if (!config) return undefined;
-  return {
-    ...config,
-    getUserInfo: redirectSignInFailures(provider, config.getUserInfo),
-  };
-}
-
 function createUserAuthRuntime(
   config: NormalizedUserAuthConfig,
   database: SqlDatabase
 ): UserAuthRuntime {
   const admissionPolicy = new AdmissionPolicy(config.admission);
   const claim = new SignInClaim(new IdentityClaimStore(database));
-  const github = withFailureRedirect(
+  const github = withClaim(
     "github",
-    withClaim(
-      "github",
-      claim,
-      createGitHubAuthConfig(config.providers.github, config.appName, admissionPolicy)
-    )
+    claim,
+    createGitHubAuthConfig(config.providers.github, config.appName, admissionPolicy)
   );
-  const google = withFailureRedirect(
+  const google = withClaim(
     "google",
-    withClaim("google", claim, createGoogleAuthConfig(config.providers.google, admissionPolicy))
+    claim,
+    createGoogleAuthConfig(config.providers.google, admissionPolicy)
   );
 
   const auth = createUserAuth({

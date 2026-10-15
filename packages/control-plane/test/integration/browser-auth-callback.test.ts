@@ -34,6 +34,7 @@ let googleIdToken = "";
 let googlePublicKey: JsonWebKey;
 let googleCertRequestCount = 0;
 let githubEmailLookupStatus = 200;
+let githubEmailLookupHeaders: Record<string, string> = {};
 
 async function signedWebRequest(
   path: string,
@@ -123,7 +124,7 @@ beforeAll(async () => {
       if (githubEmailLookupStatus !== 200) {
         return Response.json(
           { message: "Resource not accessible by integration" },
-          { status: githubEmailLookupStatus }
+          { status: githubEmailLookupStatus, headers: githubEmailLookupHeaders }
         );
       }
       return Response.json([
@@ -165,6 +166,7 @@ beforeEach(async () => {
   await cleanD1Tables();
   googleCertRequestCount = 0;
   githubEmailLookupStatus = 200;
+  githubEmailLookupHeaders = {};
 });
 
 afterAll(() => {
@@ -462,53 +464,73 @@ describe("browser auth callback", () => {
     expect(channelOnlyResponse.status).toBe(401);
   });
 
-  it("redirects a GitHub sign-in to the access-denied page when GitHub rejects the email lookup", async () => {
-    githubEmailLookupStatus = 403;
-    // A separate client keeps this sign-in out of the other tests' rate-limit bucket.
-    const clientIp = "203.0.113.91";
-    const initiationBody = JSON.stringify({
-      provider: "github",
-      callbackURL: "/after-sign-in",
-      disableRedirect: true,
-    });
-    const initiationResponse = await handleRequest(
-      await signedWebRequest("/api/auth/sign-in/social", {
-        method: "POST",
-        body: initiationBody,
-        clientIp,
-      }),
-      env
-    );
-    expect(initiationResponse.status).toBe(200);
-    const providerUrl = new URL((await initiationResponse.json<{ url: string }>()).url);
-    const state = providerUrl.searchParams.get("state");
-    const stateCookie = cookiePair(initiationResponse, "__Secure-openinspect.state");
-
-    const callbackResponse = await handleRequest(
-      await signedWebRequest(
-        `/api/auth/callback/github?code=authorization-code&state=${encodeURIComponent(state ?? "")}`,
-        {
-          method: "GET",
-          cookie: stateCookie,
+  it.each([
+    [403, {}, "provider_rejected", "203.0.113.91"],
+    [403, { "x-ratelimit-remaining": "0" }, "provider_unavailable", "203.0.113.92"],
+    [502, {}, "provider_unavailable", "203.0.113.93"],
+  ] as const)(
+    "redirects to login when GitHub rejects the email lookup (%s, %j)",
+    async (status, headers, reason, clientIp) => {
+      githubEmailLookupStatus = status;
+      githubEmailLookupHeaders = headers;
+      const requestEnv = {
+        ...env,
+        UNSAFE_ALLOW_ALL_USERS: "false",
+        ALLOWED_USERS: "octocat",
+        GOOGLE_CLIENT_ID: undefined,
+        GOOGLE_CLIENT_SECRET: undefined,
+      };
+      // A separate client keeps this sign-in out of the other tests' rate-limit bucket.
+      const initiationBody = JSON.stringify({
+        provider: "github",
+        callbackURL: "/after-sign-in",
+        disableRedirect: true,
+      });
+      const initiationResponse = await handleRequest(
+        await signedWebRequest("/api/auth/sign-in/social", {
+          method: "POST",
+          body: initiationBody,
           clientIp,
-        }
-      ),
-      env
-    );
+        }),
+        requestEnv
+      );
+      expect(initiationResponse.status).toBe(200);
+      const providerUrl = new URL((await initiationResponse.json<{ url: string }>()).url);
+      const state = providerUrl.searchParams.get("state");
+      const stateCookie = cookiePair(initiationResponse, "__Secure-openinspect.state");
 
-    expect(callbackResponse.status).toBe(302);
-    expect(callbackResponse.headers.get("Location")).toBe(
-      "/access-denied?error=provider_rejected&provider=github"
-    );
-    expect(
-      getSetCookies(callbackResponse.headers).some((cookie) =>
-        cookie.startsWith("__Secure-openinspect.session_token=")
-      )
-    ).toBe(false);
-    await expect(env.DB.prepare("SELECT COUNT(*) AS count FROM users").first()).resolves.toEqual({
-      count: 0,
-    });
-  });
+      const callbackResponse = await handleRequest(
+        await signedWebRequest(
+          `/api/auth/callback/github?code=authorization-code&state=${encodeURIComponent(state ?? "")}`,
+          {
+            method: "GET",
+            cookie: stateCookie,
+            clientIp,
+          }
+        ),
+        requestEnv
+      );
+
+      expect(callbackResponse.status).toBe(302);
+      expect(callbackResponse.headers.get("Location")).toBe(
+        `/login?error=${reason}&provider=github`
+      );
+      expect(
+        getSetCookies(callbackResponse.headers).some((cookie) =>
+          cookie.startsWith("__Secure-openinspect.session_token=")
+        )
+      ).toBe(false);
+      expect(getSetCookies(callbackResponse.headers)).toContainEqual(
+        expect.stringMatching(/^__Secure-openinspect\.state=;.*Max-Age=0/)
+      );
+      await expect(
+        env.DB.prepare("SELECT COUNT(*) AS count FROM auth_sessions").first()
+      ).resolves.toEqual({ count: 0 });
+      await expect(env.DB.prepare("SELECT COUNT(*) AS count FROM users").first()).resolves.toEqual({
+        count: 0,
+      });
+    }
+  );
 
   it("signs an existing canonical user in through a migrated GitHub account", async () => {
     const canonicalUserId = "11111111111111111111111111111111";

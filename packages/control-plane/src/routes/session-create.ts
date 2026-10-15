@@ -6,7 +6,7 @@ import {
   checkHarnessCompatibility,
   getValidHarnessOrDefault,
 } from "@open-inspect/shared/harnesses";
-import { getValidModelOrDefault, isValidReasoningEffort } from "@open-inspect/shared/models";
+import { HarnessAdmissionError, resolveHarnessSelection } from "../harness-admission";
 import type { CreateSessionResponse } from "@open-inspect/shared/types/session-api";
 import { generateId } from "../auth/crypto";
 import { resolveGitHubCredentialAuthority } from "../source-control/github-credential-authority";
@@ -18,20 +18,20 @@ import { resolveEnvironmentTarget, resolveSessionRepositories } from "../repos/r
 import { resolveScmProviderFromEnv } from "../source-control";
 import { EnvironmentStore } from "../db/environments";
 import { UserStore } from "../db/user-store";
-import { TeamStore } from "../db/teams";
 import { TeamMembershipStore } from "../db/team-memberships";
-import { TeamSettingsStore } from "../db/team-settings";
-import { missingTeamRepository } from "./session-team-grants";
 import { createLogger } from "../logger";
 import { parseCreateSessionInput } from "../session/create-session-input";
 import { initializeSession, type SessionInitInput } from "../session/initialize";
 import { resolveGitHubEnrichmentForRequest } from "../session/identity";
 import { resolveSessionScopedSettings } from "../session/integration-settings-resolution";
 import { resolveManagedSkills, SkillResolutionError } from "../session/skill-resolution";
+import { resolvedPin } from "../session/pinned";
+import { createSessionMemorySelector } from "../memory/session-memory-selector-factory";
 import type { Env } from "../types";
 import { resolveSessionProviderAuth } from "../session/provider-account-resolution";
 import { ProviderAccountSelectionPolicyError } from "../model-provider-accounts/selection-policy";
-import { authorizeSessionTarget } from "./session-target-authorization";
+import { authorizeEnvironmentTarget, authorizeSessionTarget } from "./session-target-authorization";
+import { resolveCreationOwnerTeam, teamRequiredResponse } from "./team-ownership";
 import {
   normalizeOptionalRepositoryPair,
   RepositoryPairValidationError,
@@ -101,11 +101,21 @@ export async function handleCreateSession(
     throw e;
   }
 
-  const targetAuthorizationError = authorizeSessionTarget(ctx, {
+  const targetAuthorizationError = await authorizeSessionTarget(ctx, {
+    teamId: null,
     environmentId: body.environmentId,
-    hasRepository: Boolean(repositoryContext || body.repositories),
+    repositories: (body.repositories ?? (repositoryContext ? [repositoryContext] : [])).map(
+      (repository) => ({ owner: repository.repoOwner, name: repository.repoName })
+    ),
   });
   if (targetAuthorizationError) return targetAuthorizationError;
+  if (body.environmentId) {
+    const environmentError = await authorizeEnvironmentTarget(ctx, {
+      environmentId: body.environmentId,
+      ownerTeamId: body.teamId ?? null,
+    });
+    if (environmentError) return environmentError;
+  }
 
   // Validate branch names if provided (defense in depth)
   if (body.branch && !BRANCH_NAME_PATTERN.test(body.branch)) {
@@ -167,39 +177,30 @@ export async function handleCreateSession(
   if (resolution instanceof Response) return resolution;
   const resolvedUserId = resolution;
   const teamId = body.teamId ?? null;
-  if (!teamId && (await new TeamSettingsStore(ctx.db).get()).requireTeamOnCreate) {
-    return json({ error: "A team is required", code: "team_required" }, 400);
-  }
-  let team = null;
+  const team = await resolveCreationOwnerTeam(ctx, teamId);
+  if (team instanceof Response) return team;
   if (teamId) {
-    team = await new TeamStore(ctx.db).getById(teamId);
-    if (!team) return error("Team not found", 404);
-    if (team.archivedAt !== null)
-      return json({ error: "Team archived", code: "team_archived" }, 409);
     if (
       !resolvedUserId ||
       !(await new TeamMembershipStore(ctx.db).listForUser(resolvedUserId)).has(teamId)
     ) {
       return json({ error: "Not a team member", code: "not_member" }, 403);
     }
-    const missing = await missingTeamRepository(
-      ctx.db,
-      teamId,
-      repositories ?? (repoOwner && repoName ? [{ repoOwner, repoName, repoId }] : [])
-    );
-    if (missing)
-      return json(
-        {
-          error: "Target team lacks repository grant",
-          code: "target_team_missing_grant",
-          repository: `${missing.repoOwner}/${missing.repoName}`,
-        },
-        409
-      );
   }
+  const resolvedTargetAuthorizationError = await authorizeSessionTarget(ctx, {
+    teamId,
+    environmentId,
+    repositories: (
+      repositories ?? (repoOwner && repoName ? [{ repoOwner, repoName, repoId }] : [])
+    ).map((repository) => ({
+      owner: repository.repoOwner,
+      name: repository.repoName,
+      repoId: repository.repoId,
+    })),
+  });
+  if (resolvedTargetAuthorizationError) return resolvedTargetAuthorizationError;
   const visibility = body.visibility ?? team?.defaultVisibility ?? "workspace";
-  if (visibility === "team" && !teamId)
-    return json({ error: "A team is required", code: "team_required" }, 400);
+  if (visibility === "team" && !teamId) return teamRequiredResponse();
   if (visibility === "private" && !resolvedUserId)
     return json({ error: "Session owner required", code: "owner_required" }, 400);
 
@@ -230,19 +231,25 @@ export async function handleCreateSession(
 
   // Validate harness, model and reasoning effort once for both DO init and D1 index
   const harness = getValidHarnessOrDefault(body.harness);
-  const model = getValidModelOrDefault(body.model);
-  const harnessModelIncompatibility = checkHarnessCompatibility(harness, model);
-  if (harnessModelIncompatibility) return error(harnessModelIncompatibility.message, 400);
-  const reasoningEffort =
-    body.reasoningEffort && isValidReasoningEffort(model, body.reasoningEffort)
-      ? body.reasoningEffort
-      : null;
+  let selection;
+  try {
+    selection = await resolveHarnessSelection(ctx.db, env, {
+      harness,
+      model: body.model,
+      reasoningEffort: body.reasoningEffort,
+    });
+  } catch (cause) {
+    if (cause instanceof HarnessAdmissionError) return error(cause.message, cause.status);
+    throw cause;
+  }
+  const { model, reasoningEffort } = selection;
 
   // Session-scoped integration settings resolve from the primary member (design
   // §6.2). In list mode that is repositories[0]; otherwise the scalar pair — the
   // two are the same repo by the row-0-mirrors-scalars invariant. Launching
   // from a saved environment layers its overrides on top (design §13.5).
-  const scopeMembers = repositories ?? (repoOwner && repoName ? [{ repoOwner, repoName }] : []);
+  const scopeMembers =
+    repositories ?? (repoOwner && repoName ? [{ repoOwner, repoName, repoId }] : []);
   const { codeServerEnabled, vncEnabled, sandboxSettings } = await resolveSessionScopedSettings(
     ctx.db,
     scopeMembers,
@@ -284,7 +291,15 @@ export async function handleCreateSession(
     throw e;
   }
 
+  const memorySelection = await createSessionMemorySelector(ctx).select({
+    principal: { userId: resolvedUserId, ownerTeamId: teamId },
+    repositories: scopeMembers,
+    environmentId,
+    includePersonalMemories: body.includePersonalMemories,
+  });
+
   const input: SessionInitInput = {
+    memory: resolvedPin(memorySelection),
     ownerTeamId: teamId,
     visibility,
     sessionId,
@@ -310,13 +325,14 @@ export async function handleCreateSession(
     vncEnabled,
     sandboxSettings,
     spawnSource,
-    managedSkillsManifest,
+    managedSkills: resolvedPin(managedSkillsManifest),
     providerAuth,
   };
 
   try {
     await initializeSession(env, input, ctx);
   } catch (e) {
+    if (e instanceof HarnessAdmissionError) return error(e.message, e.status);
     logger.error("Failed to initialize session", {
       error: e instanceof Error ? e.message : String(e),
       session_id: sessionId,

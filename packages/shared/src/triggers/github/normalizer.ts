@@ -69,7 +69,8 @@ function getIssueLabels(issue: IssuesPayload["issue"]): string[] | undefined {
 
 export function normalizeGitHubEvent(
   githubEventHeader: string,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  deliveryId?: string
 ): GitHubAutomationEvent | null {
   const action = payload.action;
 
@@ -85,7 +86,7 @@ export function normalizeGitHubEvent(
     case "pull_request": {
       const parsed = pullRequestEventSchema.safeParse(payload);
       if (!parsed.success) return null;
-      return normalizePullRequest(eventType, action, parsed.data);
+      return normalizePullRequest(eventType, action, parsed.data, deliveryId);
     }
 
     case "issue_comment": {
@@ -172,18 +173,23 @@ function getPullRequestFacts(
 function normalizePullRequest(
   eventType: string,
   action: string,
-  payload: PullRequestPayload
+  payload: PullRequestPayload,
+  deliveryId: string | undefined
 ): GitHubAutomationEvent {
   const pr = payload.pull_request;
   const headSha = pr.head?.sha;
   const branch = pr.head?.ref;
   const targetBranch = pr.base?.ref;
+  // A PR can go ready -> draft -> ready without a new commit. The delivery id
+  // tells those transitions apart; GitHub keeps it on redelivery, so retries still dedupe.
+  const occurrence = action === "ready_for_review" ? `:${deliveryId ?? "unknown"}` : "";
 
   return {
     source: "github",
     eventType,
-    triggerKey: `pr:${pr.number}:${action}:${headSha ?? "unknown"}`,
+    triggerKey: `pr:${pr.number}:${action}:${headSha ?? "unknown"}${occurrence}`,
     concurrencyKey: `pr:${pr.number}`,
+    repositoryId: payload.repository.id,
     repoOwner: getRepoOwner(payload),
     repoName: getRepoName(payload),
     branch,
@@ -212,6 +218,7 @@ function normalizeIssueComment(
     eventType,
     triggerKey: `issue_comment:${commentId}`,
     concurrencyKey: `issue_comment:${commentId}`,
+    repositoryId: payload.repository.id,
     repoOwner: getRepoOwner(payload),
     repoName: getRepoName(payload),
     actor: getActor(payload),
@@ -236,6 +243,7 @@ function normalizeReviewComment(
     eventType,
     triggerKey: `pr_review_comment:${commentId}`,
     concurrencyKey: `pr:${pr.number}`,
+    repositoryId: payload.repository.id,
     repoOwner: getRepoOwner(payload),
     repoName: getRepoName(payload),
     branch: pr.head?.ref,
@@ -259,6 +267,7 @@ function normalizeCheckSuite(eventType: string, payload: CheckSuitePayload): Git
     eventType,
     triggerKey: `check_suite:${checkSuite.id}`,
     concurrencyKey: `check_suite:${checkSuite.id}`,
+    repositoryId: payload.repository.id,
     repoOwner: getRepoOwner(payload),
     repoName: getRepoName(payload),
     branch: checkSuite.head_branch ?? undefined,
@@ -289,6 +298,7 @@ function normalizeWorkflowRun(
     eventType,
     triggerKey: `workflow_run:${run.id}:${run.run_attempt}`,
     concurrencyKey: `workflow_run:${run.id}`,
+    repositoryId: payload.repository.id,
     repoOwner: getRepoOwner(payload),
     repoName: getRepoName(payload),
     branch: run.head_branch ?? undefined,
@@ -317,6 +327,7 @@ function normalizeIssue(
     eventType,
     triggerKey: `issue:${issue.number}:${action}`,
     concurrencyKey: `issue:${issue.number}`,
+    repositoryId: payload.repository.id,
     repoOwner: getRepoOwner(payload),
     repoName: getRepoName(payload),
     labels: getIssueLabels(issue),

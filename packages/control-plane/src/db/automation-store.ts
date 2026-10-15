@@ -5,6 +5,7 @@
  * snake_case rows in the database, camelCase types at the API boundary.
  */
 
+import { isWorkspaceAdmin, WORKSPACE_ADMIN_ROLE_KEYS } from "@open-inspect/shared/rbac";
 import {
   DEFAULT_HARNESS,
   getValidHarnessOrDefault,
@@ -32,9 +33,18 @@ import {
   type AutomationModelProviderAuthRow,
 } from "./automation-model-provider-auth";
 import type { SqlDatabase, SqlStatement } from "./sql-database";
+import { MAX_D1_QUERY_PARAMETERS } from "./query-limits";
 import type { CreatedAtCursor } from "../created-at-cursor";
 import { z } from "zod";
 import { UserStore } from "./user-store";
+import { rolePermissionPredicate } from "../authorization/permission-sql";
+import { automationExecutionPredicate } from "../automation/authorization-guard";
+import type { SessionViewer } from "@open-inspect/shared";
+
+/** Legacy rows predate canonical executors; their GitHub creator may now map to a user. */
+function needsCanonicalOwner(row: AutomationRow): boolean {
+  return !row.user_id && !!row.created_by && row.created_by !== "anonymous";
+}
 
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
@@ -99,8 +109,7 @@ export function withValidatedOwnerTeam(row: AutomationRow): AutomationRow {
 }
 
 type AutomationListResult = { automations: AutomationRow[] } & (
-  | { hasMore: false; nextCursor: null }
-  | { hasMore: true; nextCursor: CreatedAtCursor }
+  { hasMore: false; nextCursor: null } | { hasMore: true; nextCursor: CreatedAtCursor }
 );
 
 /**
@@ -137,6 +146,38 @@ export interface AutomationRunRow {
   base_branch: string | null;
   /** Environment snapshot taken at firing time (null for repository/repo-less runs). */
   environment_id: string | null;
+  /**
+   * 1 from the session claim until the run's own first prompt is on its session's
+   * queue; session continuity holds follow-ups meanwhile. 0 otherwise, including on
+   * rows that predate the column.
+   */
+  first_prompt_pending: number;
+}
+
+export interface ContinuableRunRow extends AutomationRunRow {
+  /** The session's latest activity, or the run's creation when it has no session row. */
+  last_activity_at: number;
+  /** 1 while follow-ups held during the run's launch still await release. */
+  has_held_prompts: number;
+}
+
+/** {@link AutomationStore.holdPromptForLaunchingRun}: not holding once the run is ready and drained. */
+export type HoldPromptResult = "held" | "duplicate" | "not_holding";
+
+/** A continuity follow-up held until its run's first prompt is queued. */
+export interface HeldPromptRow {
+  id: string;
+  run_id: string;
+  actor_user_id: string;
+  actor_author_id: string;
+  /** The prompt's clientRequestId, unique per run. */
+  client_request_id: string;
+  /** JSON enqueue-prompt request body. */
+  prompt: string;
+  request_id: string;
+  created_at: number;
+  /** When the held-prompt sweep next tries to settle the run's held prompts. */
+  retry_at: number;
 }
 
 export interface EnrichedRunRow extends AutomationRunRow {
@@ -181,6 +222,9 @@ export interface AutomationInvocationRow {
   updated_at: number;
 }
 
+export type FollowUpReceiptClaim =
+  { kind: "claimed" } | { kind: "accepted" | "pending"; invocationId: string };
+
 export interface AutomationTriggerFields {
   triggerType: AutomationTriggerType;
   triggerConfig: TriggerConfig | null;
@@ -218,8 +262,7 @@ const countRowSchema = z.object({ count: z.number() });
  * active run of the automation; event firings block per concurrency key.
  */
 export type InvocationOverlapScope =
-  | { kind: "automation" }
-  | { kind: "concurrencyKey"; concurrencyKey: string };
+  { kind: "automation" } | { kind: "concurrencyKey"; concurrencyKey: string };
 
 /**
  * A cron slot handover: move the schedule from the slot this firing claimed
@@ -276,6 +319,7 @@ export function toAutomation(
     consecutiveFailures: row.consecutive_failures,
     createdBy: row.created_by,
     userId: row.user_id,
+    ownerTeamId: row.owner_team_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
@@ -316,7 +360,7 @@ export function toAutomationRun(row: EnrichedRunRow): AutomationRun {
 // order: childless ⇒ skipped (new skips are childless; the app enforces
 // skip_reason on them); any active child ⇒ starting until any child has left
 // 'starting', then running; all-terminal: all skipped ⇒ skipped (legacy
-// backfilled skip rows), no failure ⇒ completed, no success ⇒ failed,
+// backfilled skip rows), any denied child ⇒ unauthorized, no failure ⇒ completed, no success ⇒ failed,
 // otherwise partial_failed.
 
 const DERIVED_INVOCATION_STATUS_SQL = `CASE
@@ -327,6 +371,7 @@ const DERIVED_INVOCATION_STATUS_SQL = `CASE
       ELSE 'running'
     END
   WHEN SUM(CASE WHEN r.status = 'skipped' THEN 1 ELSE 0 END) = COUNT(r.id) THEN 'skipped'
+  WHEN SUM(CASE WHEN r.status = 'unauthorized' THEN 1 ELSE 0 END) > 0 THEN 'unauthorized'
   WHEN SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) = 0 THEN 'completed'
   WHEN SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) = 0 THEN 'failed'
   ELSE 'partial_failed'
@@ -339,16 +384,34 @@ const DERIVED_INVOCATION_COMPLETED_AT_SQL = `CASE
   ELSE MAX(r.completed_at)
 END`;
 
+/** Invocations with derived status/completion; callers append WHERE … GROUP BY i.id. */
+const ENRICHED_INVOCATION_SELECT_SQL = `SELECT i.*,
+  ${DERIVED_INVOCATION_STATUS_SQL} AS derived_status,
+  ${DERIVED_INVOCATION_COMPLETED_AT_SQL} AS derived_completed_at
+FROM automation_invocations i
+LEFT JOIN automation_runs r ON r.invocation_id = i.id`;
+
+/** Child runs shaped as EnrichedRunRow; callers append WHERE … ORDER BY. */
+const INVOCATION_CHILD_RUN_SELECT_SQL = `SELECT r.*, s.title AS session_title, NULL AS artifact_summary
+FROM automation_runs r
+LEFT JOIN sessions s ON r.session_id = s.id`;
+
 /**
  * TS twin of DERIVED_INVOCATION_STATUS_SQL over a sibling aggregate. Keep the
  * two in lockstep.
  */
+/** True when a firing produced children and every one was denied authorization. */
+export function allRunsUnauthorized(runs: readonly Pick<AutomationRunRow, "status">[]): boolean {
+  return runs.length > 0 && runs.every((run) => run.status === "unauthorized");
+}
+
 export function deriveInvocationStatus(counts: {
   total: number;
   active: number;
   failed: number;
   completed: number;
   skipped: number;
+  unauthorized: number;
   // Required: distinguishes "starting" from "running". InvocationRunAggregate
   // folds both into `active` and has no `starting`, so it must not be passed here.
   starting: number;
@@ -358,6 +421,7 @@ export function deriveInvocationStatus(counts: {
     return counts.starting === counts.total ? "starting" : "running";
   }
   if (counts.skipped === counts.total) return "skipped";
+  if (counts.unauthorized > 0) return "unauthorized";
   if (counts.failed === 0) return "completed";
   if (counts.completed === 0) return "failed";
   return "partial_failed";
@@ -447,9 +511,7 @@ export class AutomationStore {
    * a storage invariant rather than a side effect of starting an invocation.
    */
   async resolveCanonicalOwner(automation: AutomationRow): Promise<AutomationRow> {
-    if (automation.user_id || !automation.created_by || automation.created_by === "anonymous") {
-      return automation;
-    }
+    if (!needsCanonicalOwner(automation)) return automation;
 
     const identity = await new UserStore(this.db).getIdentity("github", automation.created_by);
     if (!identity) return automation;
@@ -464,15 +526,67 @@ export class AutomationStore {
     return (await this.getById(automation.id)) ?? automation;
   }
 
+  /**
+   * Project the canonical owner that {@link resolveCanonicalOwner} would repair, for a page of
+   * rows in one bounded lookup, so collection capabilities agree with item admission.
+   */
+  async projectCanonicalOwners(rows: readonly AutomationRow[]): Promise<AutomationRow[]> {
+    const legacyCreators = [
+      ...new Set(rows.filter(needsCanonicalOwner).map((row) => row.created_by)),
+    ];
+    const owners = new Map<string, string>();
+    for (let offset = 0; offset < legacyCreators.length; offset += MAX_D1_QUERY_PARAMETERS) {
+      const chunk = legacyCreators.slice(offset, offset + MAX_D1_QUERY_PARAMETERS);
+      const result = await this.db
+        .prepare(
+          `SELECT provider_user_id, user_id FROM user_identities
+           WHERE provider = 'github' AND provider_user_id IN (${chunk.map(() => "?").join(", ")})`
+        )
+        .bind(...chunk)
+        .all<{ provider_user_id: string; user_id: string }>();
+      for (const identity of result.results ?? []) {
+        owners.set(identity.provider_user_id, identity.user_id);
+      }
+    }
+    return rows.map((row) => {
+      const owner = needsCanonicalOwner(row) ? owners.get(row.created_by) : undefined;
+      return owner ? { ...row, user_id: owner } : row;
+    });
+  }
+
   async list(options: {
     limit: number;
     cursor?: CreatedAtCursor | null;
     nameSearch?: string;
     repoOwner?: string;
     repoName?: string;
+    viewer?: SessionViewer;
+    teamId?: string | null;
   }): Promise<AutomationListResult> {
     const conditions: string[] = ["deleted_at IS NULL"];
     const params: unknown[] = [];
+
+    const viewer = options.viewer;
+    if (viewer?.kind === "user") {
+      if (viewer.suspended || !viewer.permissions.includes("automations.read")) {
+        conditions.push("0 = 1");
+      } else if (!isWorkspaceAdmin(viewer.roleKey)) {
+        // One bound parameter regardless of how many teams the viewer belongs to.
+        conditions.push(
+          `(owner_team_id IS NULL OR EXISTS (
+             SELECT 1 FROM team_memberships m
+             WHERE m.team_id = automations.owner_team_id AND m.user_id = ?))`
+        );
+        params.push(viewer.userId);
+      }
+    } else if (viewer?.kind === "service" && viewer.teamId !== null) {
+      conditions.push("(owner_team_id IS NULL OR owner_team_id = ?)");
+      params.push(viewer.teamId);
+    }
+    if (options.teamId !== undefined) {
+      conditions.push("owner_team_id IS ?");
+      params.push(options.teamId);
+    }
 
     if (options.nameSearch) {
       conditions.push("name LIKE ? ESCAPE '\\' COLLATE NOCASE");
@@ -608,6 +722,51 @@ export class AutomationStore {
     const statement = this.bindAutomationUpdate(id, fields);
     if (statement) await statement.run();
     return this.getById(id);
+  }
+
+  /**
+   * Reassign the executor only if, at write time, the caller still holds reassignment authority
+   * and the candidate can still launch the automation's current targets.
+   */
+  bindExecutorChange(automation: AutomationRow, userId: string, actorUserId: string): SqlStatement {
+    const manageOwn = rolePermissionPredicate("automations.manage.own");
+    const manageAny = rolePermissionPredicate("automations.manage.any");
+    const execution = automationExecutionPredicate({
+      automationId: automation.id,
+      executionUserId: userId,
+      requiresRepositoryUse: "stored",
+      requiresEnvironmentUse: "stored",
+    });
+    return this.db
+      .prepare(
+        `UPDATE automations SET user_id = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL AND user_id IS ? AND owner_team_id IS ?
+           AND user_id IS NOT ?
+           AND EXISTS (
+             SELECT 1 FROM users actor
+             JOIN user_role_assignments actor_role ON actor_role.user_id = actor.id
+             JOIN roles r ON r.id = actor_role.role_id
+             WHERE actor.id = ? AND actor.suspended_at IS NULL
+               AND (${manageOwn.sql} OR ${manageAny.sql})
+               AND (r.key IN (${WORKSPACE_ADMIN_ROLE_KEYS.map(() => "?").join(", ")}) OR EXISTS (
+                 SELECT 1 FROM team_memberships lead_membership
+                 WHERE lead_membership.team_id = automations.owner_team_id
+                   AND lead_membership.user_id = actor.id AND lead_membership.role = 'lead')))
+           AND ${execution.sql}`
+      )
+      .bind(
+        userId,
+        Date.now(),
+        automation.id,
+        automation.user_id,
+        automation.owner_team_id,
+        userId,
+        actorUserId,
+        ...manageOwn.values,
+        ...manageAny.values,
+        ...WORKSPACE_ADMIN_ROLE_KEYS,
+        ...execution.values
+      );
   }
 
   /** Build a soft-delete statement for composition in an atomic batch. */
@@ -899,7 +1058,9 @@ export class AutomationStore {
   /**
    * Atomically assign a session only while a run still awaits launch. The
    * deadline lands in the same statement that makes the run sweepable, so a
-   * 'running' row never exists without one.
+   * 'running' row never exists without one. The run's first prompt stays
+   * pending until {@link markRunFirstPromptQueued}; continuity follow-ups are
+   * held until then.
    */
   async claimRunSession(
     id: string,
@@ -910,12 +1071,24 @@ export class AutomationStore {
     const result = await this.db
       .prepare(
         `UPDATE automation_runs
-         SET status = 'running', session_id = ?, started_at = ?, execution_deadline_at = ?
+         SET status = 'running', session_id = ?, started_at = ?, execution_deadline_at = ?,
+             first_prompt_pending = 1
          WHERE id = ? AND status = 'starting'`
       )
       .bind(sessionId, startedAt, executionDeadlineAt, id)
       .run();
     return (result.meta?.changes ?? 0) > 0;
+  }
+
+  /**
+   * Record that a run's own first prompt is on its session's queue. From here on
+   * {@link holdPromptForLaunchingRun} refuses, so follow-ups go straight to the session.
+   */
+  async markRunFirstPromptQueued(id: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE automation_runs SET first_prompt_pending = 0 WHERE id = ?")
+      .bind(id)
+      .run();
   }
 
   /**
@@ -1060,9 +1233,18 @@ export class AutomationStore {
     children: AutomationRunRow[];
     overlapScope: InvocationOverlapScope;
     advanceSchedule?: ScheduleAdvance;
+    /** Team grants version the targets were authorized against; a change refuses admission. */
+    teamGrantsVersion?: { teamId: string; version: number };
   }): Promise<{ inserted: boolean }> {
     const invocation = params.invocation;
     const overlap = this.overlapPredicate(invocation.automation_id, params.overlapScope);
+    const grants = params.teamGrantsVersion;
+    const grantsGuard = grants
+      ? {
+          sql: "AND EXISTS (SELECT 1 FROM teams WHERE id = ? AND grants_version = ?)",
+          params: [grants.teamId, grants.version],
+        }
+      : { sql: "", params: [] };
     const statements: SqlStatement[] = [];
     statements.push(
       this.db
@@ -1071,7 +1253,7 @@ export class AutomationStore {
            (id, automation_id, source, scheduled_at, trigger_key, concurrency_key,
             trigger_metadata, skip_reason, failure_counted_at, created_at, updated_at)
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-           WHERE NOT EXISTS (${overlap.sql})`
+           WHERE NOT EXISTS (${overlap.sql}) ${grantsGuard.sql}`
         )
         .bind(
           invocation.id,
@@ -1085,7 +1267,8 @@ export class AutomationStore {
           invocation.failure_counted_at,
           invocation.created_at,
           invocation.updated_at,
-          ...overlap.params
+          ...overlap.params,
+          ...grantsGuard.params
         )
     );
 
@@ -1126,14 +1309,16 @@ export class AutomationStore {
       statements.push(
         this.db
           .prepare(
+            // A grants change leaves the slot due, so the next tick re-authorizes it.
             `UPDATE automations SET next_run_at = ?, updated_at = ?
-             WHERE id = ? AND deleted_at IS NULL AND next_run_at = ?`
+             WHERE id = ? AND deleted_at IS NULL AND next_run_at = ? ${grantsGuard.sql}`
           )
           .bind(
             params.advanceSchedule.nextRunAt,
             Date.now(),
             invocation.automation_id,
-            params.advanceSchedule.fromSlot
+            params.advanceSchedule.fromSlot,
+            ...grantsGuard.params
           )
       );
     }
@@ -1247,6 +1432,155 @@ export class AutomationStore {
       .first<AutomationInvocationRow>();
   }
 
+  /** One invocation with its child runs, read from a single consistent snapshot. */
+  async getInvocation(
+    automationId: string,
+    invocationId: string
+  ): Promise<AutomationInvocation | null> {
+    const [invocationResult, childResult] = await this.db.batch([
+      this.db
+        .prepare(
+          `${ENRICHED_INVOCATION_SELECT_SQL}
+           WHERE i.id = ? AND i.automation_id = ?
+           GROUP BY i.id`
+        )
+        .bind(invocationId, automationId),
+      this.db
+        .prepare(
+          `${INVOCATION_CHILD_RUN_SELECT_SQL}
+           WHERE r.invocation_id = ?
+           ORDER BY r.created_at ASC`
+        )
+        .bind(invocationId),
+    ]);
+    const row = invocationResult.results?.[0];
+    if (!row) return null;
+    const runs = (childResult.results ?? []) as EnrichedRunRow[];
+    return toAutomationInvocation(
+      enrichedAutomationInvocationRowSchema.parse(row),
+      runs.map(toAutomationRun)
+    );
+  }
+
+  /** The invocation that admitted an event or accepted its webhook follow-up. */
+  async getInvocationIdByTriggerKey(
+    automationId: string,
+    triggerKey: string
+  ): Promise<string | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT id FROM automation_invocations WHERE automation_id = ? AND trigger_key = ?
+         UNION ALL
+         SELECT invocation_id AS id FROM automation_follow_up_receipts
+         WHERE automation_id = ? AND trigger_key = ? AND accepted_at IS NOT NULL
+         LIMIT 1`
+      )
+      .bind(automationId, triggerKey, automationId, triggerKey)
+      .first<{ id: string }>();
+    return row?.id ?? null;
+  }
+
+  /** Claim an explicit webhook key before either continuation or invocation work is admitted. */
+  async claimFollowUpReceipt(params: {
+    automationId: string;
+    triggerKey: string;
+    claimInvocationId: string;
+    claimId: string;
+    now: number;
+    expiresAt: number;
+  }): Promise<FollowUpReceiptClaim> {
+    const inserted = await this.db
+      .prepare(
+        `INSERT INTO automation_follow_up_receipts
+           (automation_id, trigger_key, invocation_id, claim_id, claim_invocation_id,
+            claim_expires_at, accepted_at, created_at)
+         VALUES (?, ?, NULL, ?, ?, ?, NULL, ?)
+         ON CONFLICT (automation_id, trigger_key) DO NOTHING`
+      )
+      .bind(
+        params.automationId,
+        params.triggerKey,
+        params.claimId,
+        params.claimInvocationId,
+        params.expiresAt,
+        params.now
+      )
+      .run();
+    if ((inserted.meta?.changes ?? 0) > 0) return { kind: "claimed" };
+
+    const reclaimed = await this.db
+      .prepare(
+        `UPDATE automation_follow_up_receipts
+         SET claim_id = ?, claim_invocation_id = ?, claim_expires_at = ?
+         WHERE automation_id = ? AND trigger_key = ?
+           AND accepted_at IS NULL AND claim_expires_at <= ?`
+      )
+      .bind(
+        params.claimId,
+        params.claimInvocationId,
+        params.expiresAt,
+        params.automationId,
+        params.triggerKey,
+        params.now
+      )
+      .run();
+    if ((reclaimed.meta?.changes ?? 0) > 0) return { kind: "claimed" };
+
+    const owner = await this.db
+      .prepare(
+        `SELECT invocation_id, claim_invocation_id, accepted_at
+         FROM automation_follow_up_receipts
+         WHERE automation_id = ? AND trigger_key = ?`
+      )
+      .bind(params.automationId, params.triggerKey)
+      .first<{
+        invocation_id: string | null;
+        claim_invocation_id: string | null;
+        accepted_at: number | null;
+      }>();
+    if (!owner) throw new Error("Failed to read webhook follow-up claim");
+    const invocationId = owner.invocation_id ?? owner.claim_invocation_id;
+    if (!invocationId) throw new Error("Webhook follow-up claim has no invocation owner");
+    return {
+      kind: owner.accepted_at === null ? "pending" : "accepted",
+      invocationId,
+    };
+  }
+
+  async acceptFollowUpReceipt(
+    automationId: string,
+    triggerKey: string,
+    claimId: string,
+    invocationId: string,
+    acceptedAt: number
+  ): Promise<void> {
+    const result = await this.db
+      .prepare(
+        `UPDATE automation_follow_up_receipts
+         SET invocation_id = ?, claim_id = NULL, claim_invocation_id = NULL,
+             claim_expires_at = NULL, accepted_at = ?
+         WHERE automation_id = ? AND trigger_key = ? AND claim_id = ? AND accepted_at IS NULL`
+      )
+      .bind(invocationId, acceptedAt, automationId, triggerKey, claimId)
+      .run();
+    if ((result.meta?.changes ?? 0) === 0)
+      throw new Error("Failed to accept webhook follow-up receipt claim");
+  }
+
+  async releaseFollowUpReceipt(
+    automationId: string,
+    triggerKey: string,
+    claimId: string
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `DELETE FROM automation_follow_up_receipts
+         WHERE automation_id = ? AND trigger_key = ? AND claim_id = ? AND accepted_at IS NULL`
+      )
+      .bind(automationId, triggerKey, claimId)
+      .run();
+  }
+
   /** Sibling-run aggregate for finalization decisions (one query, no stored status). */
   async getInvocationRunAggregate(invocationId: string): Promise<InvocationRunAggregate> {
     const row = await this.db
@@ -1306,11 +1640,7 @@ export class AutomationStore {
         .bind(automationId),
       this.db
         .prepare(
-          `SELECT i.*,
-                  ${DERIVED_INVOCATION_STATUS_SQL} AS derived_status,
-                  ${DERIVED_INVOCATION_COMPLETED_AT_SQL} AS derived_completed_at
-           FROM automation_invocations i
-           LEFT JOIN automation_runs r ON r.invocation_id = i.id
+          `${ENRICHED_INVOCATION_SELECT_SQL}
            WHERE i.automation_id = ?
            GROUP BY i.id
            ORDER BY i.created_at DESC
@@ -1328,9 +1658,7 @@ export class AutomationStore {
     const placeholders = rows.map(() => "?").join(", ");
     const childResult = await this.db
       .prepare(
-        `SELECT r.*, s.title AS session_title, NULL AS artifact_summary
-         FROM automation_runs r
-         LEFT JOIN sessions s ON r.session_id = s.id
+        `${INVOCATION_CHILD_RUN_SELECT_SQL}
          WHERE r.invocation_id IN (${placeholders})
          ORDER BY r.created_at ASC`
       )
@@ -1386,7 +1714,7 @@ export class AutomationStore {
 
   /**
    * Automations still carrying consecutive_failures whose LATEST recent
-   * non-skip invocation may be a fully-completed one (missed reset). The
+   * accounting-relevant invocation may be a fully-completed one (missed reset). The
    * caller verifies completeness via the sibling aggregate before resetting —
    * a newer failed invocation naturally disqualifies its automation here.
    */
@@ -1399,6 +1727,10 @@ export class AutomationStore {
         `SELECT a.id AS automation_id,
                 (SELECT i.id FROM automation_invocations i
                  WHERE i.automation_id = a.id AND i.skip_reason IS NULL AND i.created_at >= ?
+                   AND EXISTS (
+                     SELECT 1 FROM automation_runs r
+                     WHERE r.invocation_id = i.id
+                       AND r.status IN ('starting', 'running', 'completed', 'failed'))
                  ORDER BY i.created_at DESC LIMIT 1) AS invocation_id
          FROM automations a
          WHERE a.consecutive_failures > 0 AND a.deleted_at IS NULL
@@ -1454,30 +1786,152 @@ export class AutomationStore {
   }
 
   /**
-   * The most recent materialized run (any status, with a session) for a thread's
-   * concurrency key, created at/after `sinceMs`. Powers Slack thread-session
-   * continuity: a reply continues this run's session regardless of run status.
-   * Excludes skipped rows and not-yet-started runs (session_id NULL). Served by
+   * The most recent run for a concurrency key that has a session (any status)
+   * or is still launching. A session id the run claimed but never created (a
+   * launch that failed early) does not count. Powers session continuity: a Slack thread reply or a
+   * webhook delivery with the same `sessionKey` continues this run's session
+   * regardless of run status. Excludes skipped rows and runs that never got a
+   * session. `last_activity_at` is the session's latest activity, falling back
+   * to the run's creation; the continuity window is measured from it. Served by
    * idx_invocations_concurrency joined to idx_runs_invocation (keys live on the
    * invocation).
    */
-  async getLatestSteerableRunForThread(
+  async getLatestContinuableRun(
     automationId: string,
-    concurrencyKey: string | null,
-    sinceMs: number
-  ): Promise<AutomationRunRow | null> {
+    concurrencyKey: string | null
+  ): Promise<ContinuableRunRow | null> {
     if (concurrencyKey === null) return null;
     return this.db
       .prepare(
-        `SELECT r.* FROM automation_runs r
+        `SELECT r.*, COALESCE(s.updated_at, r.created_at) AS last_activity_at,
+           EXISTS (
+             SELECT 1 FROM automation_run_held_prompts h WHERE h.run_id = r.id
+           ) AS has_held_prompts
+         FROM automation_runs r
          JOIN automation_invocations i ON i.id = r.invocation_id
+         LEFT JOIN sessions s ON r.session_id = s.id
          WHERE r.automation_id = ?
            AND i.concurrency_key = ?
-           AND r.session_id IS NOT NULL AND r.created_at >= ?
+           AND (
+             s.id IS NOT NULL
+             OR r.status = 'starting'
+             OR (r.status = 'running' AND r.first_prompt_pending = 1)
+           )
          ORDER BY r.created_at DESC LIMIT 1`
       )
-      .bind(automationId, concurrencyKey, sinceMs)
-      .first<AutomationRunRow>();
+      .bind(automationId, concurrencyKey)
+      .first<ContinuableRunRow>();
+  }
+
+  /** Every session previously used by a continuity key, newest first. */
+  async getSessionRunsForContinuityKey(
+    automationId: string,
+    concurrencyKey: string | null
+  ): Promise<Array<{ invocation_id: string; session_id: string }>> {
+    if (concurrencyKey === null) return [];
+    const result = await this.db
+      .prepare(
+        `SELECT r.invocation_id, r.session_id FROM automation_runs r
+         JOIN automation_invocations i ON i.id = r.invocation_id
+         WHERE r.automation_id = ? AND i.concurrency_key = ? AND r.session_id IS NOT NULL
+         ORDER BY r.created_at DESC`
+      )
+      .bind(automationId, concurrencyKey)
+      .all<{ invocation_id: string; session_id: string }>();
+    return result.results || [];
+  }
+
+  // --- Held continuity prompts ---
+
+  /**
+   * Hold a follow-up for a run whose own first prompt is not queued yet, or whose
+   * earlier held follow-ups are not all released, so it queues behind them. The
+   * insert is conditional on that state, so it either lands before the release
+   * drains the run's last held prompt (and is released with them) or does nothing.
+   * A follow-up with a clientRequestId already held for the run is a duplicate.
+   */
+  async holdPromptForLaunchingRun(prompt: HeldPromptRow): Promise<HoldPromptResult> {
+    const result = await this.db
+      .prepare(
+        `INSERT INTO automation_run_held_prompts
+           (id, run_id, actor_user_id, actor_author_id, client_request_id, prompt, request_id,
+            created_at, retry_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM automation_runs
+           WHERE id = ?
+             AND (status = 'starting' OR (status = 'running' AND first_prompt_pending = 1))
+         ) OR EXISTS (SELECT 1 FROM automation_run_held_prompts WHERE run_id = ?)
+         ON CONFLICT (run_id, client_request_id) DO NOTHING`
+      )
+      .bind(
+        prompt.id,
+        prompt.run_id,
+        prompt.actor_user_id,
+        prompt.actor_author_id,
+        prompt.client_request_id,
+        prompt.prompt,
+        prompt.request_id,
+        prompt.created_at,
+        prompt.retry_at,
+        prompt.run_id,
+        prompt.run_id
+      )
+      .run();
+    if ((result.meta?.changes ?? 0) > 0) return "held";
+
+    const existing = await this.db
+      .prepare(
+        "SELECT 1 AS held FROM automation_run_held_prompts WHERE run_id = ? AND client_request_id = ?"
+      )
+      .bind(prompt.run_id, prompt.client_request_id)
+      .first<{ held: number }>();
+    return existing ? "duplicate" : "not_holding";
+  }
+
+  async getHeldPrompts(runId: string): Promise<HeldPromptRow[]> {
+    const result = await this.db
+      .prepare("SELECT * FROM automation_run_held_prompts WHERE run_id = ? ORDER BY created_at, id")
+      .bind(runId)
+      .all<HeldPromptRow>();
+    return result.results || [];
+  }
+
+  async deleteHeldPrompt(id: string): Promise<void> {
+    await this.db.prepare("DELETE FROM automation_run_held_prompts WHERE id = ?").bind(id).run();
+  }
+
+  async deleteHeldPromptsForRun(runId: string): Promise<number> {
+    const result = await this.db
+      .prepare("DELETE FROM automation_run_held_prompts WHERE run_id = ?")
+      .bind(runId)
+      .run();
+    return result.meta?.changes ?? 0;
+  }
+
+  /** Runs whose held prompts the sweep should try to settle by `now`, longest-waiting first. */
+  async getRunsWithDueHeldPrompts(now: number, limit: number): Promise<AutomationRunRow[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT r.* FROM automation_runs r
+         JOIN (
+           SELECT run_id, MIN(retry_at) AS due_at FROM automation_run_held_prompts
+           GROUP BY run_id HAVING MIN(retry_at) <= ?
+           ORDER BY due_at LIMIT ?
+         ) due ON due.run_id = r.id
+         ORDER BY due.due_at`
+      )
+      .bind(now, limit)
+      .all<AutomationRunRow>();
+    return result.results || [];
+  }
+
+  /** Push back the sweep's next attempt at a run it could not settle. */
+  async deferHeldPrompts(runId: string, retryAt: number): Promise<void> {
+    await this.db
+      .prepare("UPDATE automation_run_held_prompts SET retry_at = ? WHERE run_id = ?")
+      .bind(retryAt, runId)
+      .run();
   }
 
   // --- Recovery sweep queries ---

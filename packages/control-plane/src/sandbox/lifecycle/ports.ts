@@ -11,6 +11,12 @@ export type SandboxCheckpointOutcome =
   | { outcome: "unknown" };
 
 /**
+ * What a checkpoint's caller does once it is saved: `continue` keeps the
+ * runtime serving the session; `stop_source` stops the sandbox afterwards.
+ */
+export type SandboxCheckpointFollowUp = "continue" | "stop_source";
+
+/**
  * Startup policy hides persisted receipt representation from lifecycle consumers.
  * `normal` defers to existing startup checks; it is not permission to discard saved state.
  * Recovery variants keep snapshot locators distinct from retained provider-object locators.
@@ -23,11 +29,7 @@ export type SandboxStartupDecision =
 
 /** Internal facts used by lifecycle queue and push policies, not a caller-assembled protocol. */
 export type SandboxWorkAdmission =
-  | "unmanaged"
-  | "ready"
-  | "restore_required"
-  | "spawn_required"
-  | "held";
+  "unmanaged" | "ready" | "restore_required" | "spawn_required" | "held";
 
 /** Only unmanaged sessions retain the legacy manual-push fallback when no socket exists. */
 export type SandboxPushAdmission = "ready" | "unmanaged" | "held" | "start_required";
@@ -67,12 +69,22 @@ export interface SandboxAttachment {
   onRefusedReconnect(): "retry" | "exit";
 }
 
-/** The lifecycle result consumed by the existing alarm coordinator. */
+/**
+ * The lifecycle result consumed by the existing alarm coordinator.
+ *
+ * - `sandbox_failed`: the generation failed but may still come up or is held
+ *   for recovery, so pending prompts wait for the next spawn.
+ * - `sandbox_terminated`: the generation is gone, so the queue is re-driven
+ *   onto a replacement.
+ * - An object result abandons the boot: the prompt it was for fails with
+ *   `reason` and nothing re-drives it.
+ */
 export type SandboxAlarmResult =
   | "no_action"
   | "sandbox_failed"
   | "sandbox_terminated"
-  | { kind: "boot_budget_exceeded"; reason: string };
+  | { kind: "boot_budget_exceeded"; reason: string }
+  | { kind: "connect_timeout_unrecoverable"; reason: string };
 
 export interface SandboxAlarm {
   handleAlarm(): Promise<SandboxAlarmResult>;

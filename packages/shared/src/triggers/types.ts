@@ -79,6 +79,11 @@ const triggerConditionSchema = z.discriminatedUnion("type", [
     value: z.string(),
   }),
   z.object({
+    type: z.literal("draft"),
+    operator: z.literal("eq"),
+    value: z.boolean(),
+  }),
+  z.object({
     type: z.literal("linear_status"),
     operator: z.literal("any_of"),
     value: stringArrayConditionValueSchema,
@@ -148,6 +153,8 @@ const baseAutomationEventSchema = {
 export const githubAutomationEventSchema = z.object({
   ...baseAutomationEventSchema,
   source: z.literal("github"),
+  /** Stable GitHub repository identity for routing; owner/name are display metadata. */
+  repositoryId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   repoOwner: z.string().min(1),
   repoName: z.string().min(1),
   /** Pull request head ref when the event is tied to a PR. */
@@ -200,10 +207,16 @@ export const sentryAutomationEventSchema = z.object({
   culpritFile: z.string().optional(),
 });
 
+/** Longest webhook `sessionKey`; it is stored in the invocation's concurrency key. */
+export const WEBHOOK_SESSION_KEY_MAX_LENGTH = 256;
+
+export const webhookSessionKeySchema = z.string().min(1).max(WEBHOOK_SESSION_KEY_MAX_LENGTH);
+
 export const webhookAutomationEventSchema = z.object({
   ...baseAutomationEventSchema,
   source: z.literal("webhook"),
   automationId: z.string().min(1),
+  sessionKey: webhookSessionKeySchema.optional(),
   body: z.unknown(),
 });
 

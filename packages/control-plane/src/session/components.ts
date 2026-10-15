@@ -22,6 +22,8 @@
  */
 
 import { resolveAppName } from "@open-inspect/shared/app-name";
+import { HarnessAdmissionError, validateHarnessExecution } from "../harness-admission";
+import { getValidHarnessOrDefault } from "@open-inspect/shared/harnesses";
 import { DEFAULT_MODEL } from "@open-inspect/shared/models";
 import { sandboxPromptBlockReason } from "@open-inspect/shared/types/sandbox-shutdown";
 import { generateId, hashToken } from "../auth/crypto";
@@ -45,6 +47,8 @@ import {
   type SandboxShutdownLifecycle,
 } from "../sandbox/lifecycle/manager";
 import type { ImageBuildLookup } from "../sandbox/lifecycle/image-selection";
+// The composition root supplies launch integration ports, not consumer-facing launch mechanics.
+// eslint-disable-next-line no-restricted-imports
 import type { McpServerLookup, SlackAgentNotifyLookup } from "../sandbox/lifecycle/launch-context";
 // The composition root shares the internal access collaborator with shutdown and lifecycle only.
 // eslint-disable-next-line no-restricted-imports
@@ -55,10 +59,13 @@ import { UserStore } from "../db/user-store";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
 import { SessionIndexStore } from "../db/session-index";
 import { TeamMembershipStore } from "../db/team-memberships";
+import { TeamChannelBindingStore } from "../db/team-channel-bindings";
 import { SessionCollaboratorStore } from "../db/session-collaborators";
 import { parsePersistedSandboxSettings } from "../sandbox/settings";
 import type { SandboxSettings } from "@open-inspect/shared/types/integrations";
 import { createSourceControlProviderFromEnv, type SourceControlProvider } from "../source-control";
+import { resolveSessionCredentialScope } from "../source-control/session-scope";
+import { readCachedInstallationRepositories } from "../repos/cache";
 import { requireRepoSecretsEncryptionKey } from "../env-validation";
 import type { Env, ClientInfo } from "../types";
 import type { SessionRow } from "./types";
@@ -159,7 +166,10 @@ import { SessionTitleService } from "./title-service";
 import { parseArtifactMetadata } from "./artifact-metadata";
 import { AuthorizationError, AuthorizationService } from "../authorization/service";
 import { parseTeamsEnforcementMode, resolverDecides } from "../authorization/teams-enforcement";
-import { auditSocketPrivateBreakGlass } from "../authorization/session-socket-audit";
+import {
+  auditSocketPrivateBreakGlass,
+  auditSocketShadowDenied,
+} from "../authorization/session-socket-audit";
 import type { TeamRole } from "@open-inspect/shared/types/teams";
 import type { SessionWebSocket } from "../platform-ports";
 
@@ -213,6 +223,7 @@ export interface SessionComponents {
   sandboxEventProcessor: SessionSandboxEventProcessor;
   pushService: SandboxPushService;
   sessionLifecycleHandler: SessionLifecycleHandler;
+  callbackService: CallbackNotificationService;
 }
 
 /**
@@ -323,6 +334,9 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   // Shared single instances/closures — every consumer below takes these
   // rather than re-deriving its own copy.
   const sessionIndexStore = new SessionIndexStore(db);
+  const teamChannelBindingStore = new TeamChannelBindingStore(db);
+  const resolveCredentialScope = (sessionId: string) =>
+    resolveSessionCredentialScope(db, sessionId, () => readCachedInstallationRepositories(env));
   const teamMembershipStore = new TeamMembershipStore(db);
   const sessionCollaboratorStore = new SessionCollaboratorStore(db);
   const sessionPullRequestStore = new SessionPullRequestStore(db);
@@ -391,6 +405,10 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   const callbackService = new CallbackNotificationService({
     repository: sessionCoreRepository,
     messageRepository,
+    slackPostScope: {
+      getSession: (sessionId) => sessionIndexStore.get(sessionId),
+      getChannelBinding: (channelId) => teamChannelBindingStore.get("slack", channelId),
+    },
     env,
     completeAutomationRun: (completion) => scheduler.runComplete(completion),
     log,
@@ -470,6 +488,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     messages: messageRepository,
     failures: messageFailures,
     messenger,
+    events: eventRepository,
     sockets: wsManager,
     alarm: alarmScheduler,
     background: backgroundTasks,
@@ -495,6 +514,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     backgroundTasks,
     recordWarning: (message, eventId) =>
       recordSessionWarning(eventRepository, messenger, message, eventId),
+    resumeQueuedWork: () => messageQueue.processMessageQueue(),
   });
   const executionStop: ExecutionStopCoordinator = new ExecutionStopCoordinator(
     log,
@@ -522,7 +542,19 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     participantService,
     callbackService,
     statusService,
-    (model) => userEnvResolver.getProviderAuthenticationError(model),
+    async (model) => {
+      const session = sessionCoreRepository.getSession();
+      try {
+        await validateHarnessExecution(db, env, {
+          harness: getValidHarnessOrDefault(session?.harness),
+          model,
+        });
+      } catch (error) {
+        if (error instanceof HarnessAdmissionError) return error.message;
+        throw error;
+      }
+      return userEnvResolver.getProviderAuthenticationError(model);
+    },
     messageFailures,
     lifecycleManager,
     sessionIndexStore,
@@ -541,7 +573,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     send: (ws, msg) => wsManager.send(ws, msg),
     getSandboxSocket: () => wsManager.getSandboxSocket(),
     isSpawning: () => lifecycleManager.isSpawning(),
-    spawnSandbox: () => lifecycleManager.spawnSandbox(),
+    warmSandbox: () => lifecycleManager.spawnSandbox("warm"),
     log,
   });
 
@@ -651,6 +683,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     log,
     preserveBeforeWatchdogs: (allowCaptureRetry) =>
       lifecycleManager.handleShutdownAlarm(allowCaptureRetry),
+    redriveIdleQueue: () => lifecycleManager.redriveIdleQueue(),
   });
 
   const schedulePullRequestRefresh = (trigger: "open" | "manual"): void => {
@@ -660,7 +693,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
           sessionCoreRepository,
           artifactRepository,
           sourceControlProvider(),
-          sessionPullRequestStore
+          sessionPullRequestStore,
+          resolveCredentialScope
         ).then(({ updated, failures }) => {
           for (const artifact of updated) {
             messenger.broadcast({ type: "artifact_updated", artifact });
@@ -725,7 +759,9 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     return service.refresh(sessionRow);
   };
   const getScmCredentials = (requestLog: Logger) =>
-    new ScmCredentialsService(sourceControlProvider(), requestLog).getCredentials();
+    new ScmCredentialsService(sourceControlProvider(), requestLog, () =>
+      resolveCredentialScope(getPublicSessionId())
+    ).getCredentials();
 
   const sandboxHandler = new SandboxHandler(
     messageRepository,
@@ -791,6 +827,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
         artifactRepository,
         claims: prCreationClaims,
         sourceControlProvider: sourceControlProvider(),
+        resolveCredentialScope,
         log: requestLog,
         generateId: () => generateId(),
         pushBranchToRemote: (pushSpec) => pushService.pushBranchToRemote(pushSpec),
@@ -890,6 +927,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
       }
     },
     auditPrivateBreakGlass: (userId, row) => auditSocketPrivateBreakGlass(db, userId, row),
+    auditShadowDenied: (userId, row, reason, connectionId) =>
+      auditSocketShadowDenied(db, userId, row, reason, connectionId),
     log,
   });
 
@@ -900,6 +939,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     snapshot: () => snapshotReader.handleSnapshot(),
     sandboxAccess: () => accessReader.handleSandboxAccess(),
     prompt: (request, _url, requestLog) => messagesHandler.enqueuePrompt(request, requestLog),
+    promptRequest: (_request, url) => messagesHandler.lookupPromptRequest(url),
     autofix: (request, _url, requestLog) => autofixHandler.handle(request, requestLog),
     stop: () => messagesHandler.stop(),
     sandboxEvent: (request) => sandboxHandler.sandboxEvent(request),
@@ -1025,6 +1065,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     sandboxEventProcessor,
     pushService,
     sessionLifecycleHandler,
+    callbackService,
   };
 
   return {
@@ -1038,6 +1079,9 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
             await wsManager.expireAuthorizationLeases(Date.now());
             await alarmScheduler.rehydrate();
             await lifecycleManager.rearmRejectedStartupCleanupAlarm();
+            await lifecycleManager.rearmCaptureSettlement();
+            await lifecycleManager.replayPendingFatalReport();
+            await lifecycleManager.redriveIdleQueue();
             await terminalMessageProjection.rearm();
           },
           {
@@ -1051,6 +1095,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
 
 interface LifecycleManagerDeps {
   recordWarning: (message: string, eventId: string) => void;
+  resumeQueuedWork: () => Promise<void>;
   shutdown: SandboxShutdownLifecycle;
   access: SandboxAccess;
   provider: SandboxProvider;
@@ -1151,6 +1196,7 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
     mcpServerLookup,
     slackAgentNotifyLookup,
     recordWarning: deps.recordWarning,
+    resumeQueuedWork: deps.resumeQueuedWork,
   };
 
   // The image lookup exists only for providers that support prebuilt images,

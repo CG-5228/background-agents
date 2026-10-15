@@ -97,6 +97,7 @@ const BOOT_PHASE_DETAILS: Record<BootPhaseName, { started: string; completed: st
   sync: { started: "Cloning the repository", completed: "Cloned the repository" },
   setup: { started: "Running setup.sh", completed: "Finished setup.sh" },
   start: { started: "Running start.sh", completed: "Finished start.sh" },
+  memory: { started: "Loading memories", completed: "Memories loaded" },
   skills: { started: "Installing skills", completed: "Installed skills" },
   harness: { started: "Starting the agent", completed: "Started the agent" },
 };
@@ -140,6 +141,8 @@ export type SessionHeaderProps = {
   onToggleDetails: () => void;
   onToggleDesktopDetails: () => void;
   onOpenMobileDetails: () => void;
+  /** Opens the details overlay on the section that lists captured media. */
+  onOpenMobileMedia: () => void;
   actions: SessionActionProps;
   optimisticTitle?: string;
   renameSession: (title: string) => Promise<boolean>;
@@ -162,6 +165,7 @@ export function SessionHeader({
   onToggleDetails,
   onToggleDesktopDetails,
   onOpenMobileDetails,
+  onOpenMobileMedia,
   actions,
   optimisticTitle,
   renameSession,
@@ -288,7 +292,7 @@ export function SessionHeader({
             sandbox={sandbox}
             triggerRef={actionsButtonRef}
             onOpenDetails={onOpenMobileDetails}
-            onOpenMedia={onOpenMobileDetails}
+            onOpenMedia={onOpenMobileMedia}
           />
           <div className="hidden items-center gap-1 md:flex">
             {capabilities.read && (

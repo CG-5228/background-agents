@@ -18,6 +18,8 @@ export interface AlarmHandlerDeps {
   lifecycleManager: SandboxAlarm;
   terminalMessageProjection: Pick<SessionTerminalMessageProjection, "flushPending">;
   alarmScheduler: AlarmScheduler;
+  /** Wakes queued work for a live runtime that nothing else will; idempotent. */
+  redriveIdleQueue?: () => Promise<void>;
   /** Resolved per use so it honors settings persisted after construction. */
   getExecutionTimeoutMs: () => number;
   now: () => number;
@@ -96,15 +98,14 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
       if (lifecycleResult === "sandbox_terminated") {
         await deps.executionStop.resumeAfterSandboxTermination();
       }
-      if (
-        bootPrompt &&
-        typeof lifecycleResult === "object" &&
-        lifecycleResult.kind === "boot_budget_exceeded"
-      ) {
+      if (bootPrompt && typeof lifecycleResult === "object") {
         // The boot was for that prompt; it fails with the same words the user
         // sees, and nothing re-drives it onto a fresh sandbox.
         await deps.messageQueue.failPendingMessage(bootPrompt.id, lifecycleResult.reason);
       }
+      // Last, so the watchdogs have already fenced any runtime they found
+      // stale: a lost queue kick is repeated only for a live runtime.
+      if (lifecycleResult === "no_action") await deps.redriveIdleQueue?.();
       if (projectionFailure) throw projectionFailure.error;
     },
   };
