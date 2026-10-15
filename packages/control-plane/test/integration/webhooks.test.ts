@@ -646,6 +646,68 @@ describe("POST /webhooks/automation/:id", () => {
       expect(await fetchRuns(automation.id)).toHaveLength(1);
     });
 
+    it("finds a legacy retry after a newer session starts and conditions change", async () => {
+      const automation = await createWebhookAutomation();
+      const { invocationId, sessionId } = await startSession(automation);
+      const followUp = { sessionKey: "card-1", idempotencyKey: "event-2", step: "second" };
+      expect(await postWebhook(automation.id, followUp)).toMatchObject({ steered: 1 });
+      const receipt = () =>
+        env.DB.prepare(
+          `SELECT invocation_id FROM automation_follow_up_receipts
+           WHERE automation_id = ? AND trigger_key = 'webhook:idem:event-2'`
+        )
+          .bind(automation.id)
+          .first<{ invocation_id: string }>();
+      expect(await receipt()).toEqual({ invocation_id: invocationId });
+
+      const expiredAt = Date.now() - 8 * 24 * 60 * 60 * 1000;
+      await env.DB.batch([
+        // Simulate a follow-up accepted before central receipts existed.
+        env.DB.prepare("DELETE FROM automation_follow_up_receipts WHERE automation_id = ?").bind(
+          automation.id
+        ),
+        env.DB.prepare(
+          "UPDATE automation_runs SET status = 'completed', completed_at = ? WHERE session_id = ?"
+        ).bind(expiredAt, sessionId),
+        env.DB.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").bind(
+          expiredAt,
+          sessionId
+        ),
+      ]);
+
+      expect(
+        await postWebhook(automation.id, {
+          sessionKey: "card-1",
+          idempotencyKey: "event-3",
+          step: "third",
+        })
+      ).toMatchObject({ triggered: 1 });
+      await env.DB.prepare("UPDATE automations SET trigger_config = ? WHERE id = ?")
+        .bind(
+          JSON.stringify({
+            conditions: [
+              {
+                type: "jsonpath",
+                operator: "all_match",
+                value: [{ path: "$.step", comparison: "eq", value: "third" }],
+              },
+            ],
+          }),
+          automation.id
+        )
+        .run();
+
+      expect(await postWebhook(automation.id, followUp)).toEqual({
+        ok: true,
+        triggered: 0,
+        skipped: 1,
+        steered: 0,
+        invocationId,
+      });
+      expect(await fetchRuns(automation.id)).toHaveLength(2);
+      expect(await receipt()).toEqual({ invocation_id: invocationId });
+    });
+
     it.each([
       {
         refusal: "a closed session",

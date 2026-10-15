@@ -55,6 +55,8 @@ export interface SteeringActor {
 export interface ContinuationPolicy {
   source: "slack" | "webhook";
   logFields?: Record<string, unknown>;
+  acceptDelivery?(run: AutomationRunRow): Promise<void>;
+  releaseDelivery?(): Promise<void>;
   resolveActor(): Promise<SteeringActor | null>;
   buildPrompt(
     run: AutomationRunRow,
@@ -117,9 +119,8 @@ export async function continueSession(
   policy: ContinuationPolicy
 ): Promise<ContinuationOutcome> {
   const run = await deps.store.getLatestContinuableRun(automation.id, concurrencyKey);
-  if (!run || run.last_activity_at < now - SESSION_CONTINUITY_WINDOW_MS) {
+  if (!run || run.last_activity_at < now - SESSION_CONTINUITY_WINDOW_MS)
     return { kind: "fall_through" };
-  }
   if (!holdsFollowUps(run)) return continueRunSession(deps, run, policy);
 
   const held = await holdFollowUp(deps, run, policy);
@@ -129,6 +130,43 @@ export async function continueSession(
   const launched = await deps.store.getLatestContinuableRun(automation.id, concurrencyKey);
   return launched && !holdsFollowUps(launched)
     ? continueRunSession(deps, launched, policy)
+    : { kind: "fall_through" };
+}
+
+/**
+ * Search every session previously used by a continuity key for a durable prompt receipt.
+ * A failed lookup blocks a new delivery only when no other session proves it is a retry.
+ */
+export async function findHistoricalPromptReceipt(
+  deps: SessionContinuityDeps,
+  automation: AutomationRow,
+  concurrencyKey: string | null,
+  requestId: string
+): Promise<ContinuationOutcome> {
+  const runs = await deps.store.getSessionRunsForContinuityKey(automation.id, concurrencyKey);
+  let unavailable: (typeof runs)[number] | null = null;
+  for (const run of runs) {
+    try {
+      if (
+        await isSessionPromptRequestQueued(deps.env, run.session_id, requestId, {
+          trace_id: `automation:${automation.id}`,
+          request_id: requestId,
+        })
+      ) {
+        return { kind: "skipped", invocationId: run.invocation_id };
+      }
+    } catch (error) {
+      unavailable ??= run;
+      deps.log.warn("Failed to check a historical session for a follow-up retry", {
+        event: "scheduler.webhook_historical_dedup_failed",
+        automation_id: automation.id,
+        session_id: run.session_id,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+  return unavailable
+    ? { kind: "refused", invocationId: unavailable.invocation_id, status: null, code: null }
     : { kind: "fall_through" };
 }
 
@@ -254,7 +292,10 @@ async function continueRunSession(
 
   const fields = { automation_id: run.automation_id, session_id: sessionId, ...policy.logFields };
   const actor = await admittedActor(deps, sessionId, policy, fields);
-  if (!actor) return blocked(deps, policy, fields);
+  if (!actor) {
+    await policy.releaseDelivery?.();
+    return blocked(deps, policy, fields);
+  }
 
   // Outside the try: a follow-up that cannot be attributed must fail, not fall through to a new run.
   const { body, ctx } = await policy.buildPrompt(run, actor);
@@ -272,6 +313,7 @@ async function continueRunSession(
 
   switch (outcome.kind) {
     case "queued":
+      await policy.acceptDelivery?.(run);
       deps.log.info("Steered session with a follow-up", {
         event: `scheduler.${policy.source}_steer`,
         ...fields,
@@ -282,8 +324,10 @@ async function continueRunSession(
     // block carries its own receipt time.
     case "duplicate":
     case "request_id_taken":
+      await policy.acceptDelivery?.(run);
       return { kind: "skipped", invocationId: run.invocation_id };
     case "rejected":
+      await policy.releaseDelivery?.();
       deps.log.warn("Session refused the follow-up", {
         event: `scheduler.${policy.source}_steer_failed`,
         ...fields,
@@ -317,7 +361,10 @@ async function holdFollowUp(
     logAuthorizationFailure(deps, policy, fields, error);
     actor = null;
   }
-  if (!actor) return blocked(deps, policy, fields);
+  if (!actor) {
+    await policy.releaseDelivery?.();
+    return blocked(deps, policy, fields);
+  }
 
   const { body, ctx } = await policy.buildPrompt(run, actor);
   const id = generateId();
@@ -336,6 +383,7 @@ async function holdFollowUp(
     retry_at: Date.now() + HELD_PROMPT_RETRY_MS,
   });
   if (held === "not_holding") return null;
+  await policy.acceptDelivery?.(run);
   if (held === "duplicate") return { kind: "skipped", invocationId: run.invocation_id };
 
   deps.log.info("Held a follow-up until its run's first prompt is queued", {

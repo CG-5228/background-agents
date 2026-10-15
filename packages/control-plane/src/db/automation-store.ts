@@ -222,6 +222,9 @@ export interface AutomationInvocationRow {
   updated_at: number;
 }
 
+export type FollowUpReceiptClaim =
+  { kind: "claimed" } | { kind: "accepted" | "pending"; invocationId: string };
+
 export interface AutomationTriggerFields {
   triggerType: AutomationTriggerType;
   triggerConfig: TriggerConfig | null;
@@ -1459,16 +1462,123 @@ export class AutomationStore {
     );
   }
 
-  /** The firing that admitted an event (skips never hold a trigger_key). */
+  /** The invocation that admitted an event or accepted its webhook follow-up. */
   async getInvocationIdByTriggerKey(
     automationId: string,
     triggerKey: string
   ): Promise<string | null> {
     const row = await this.db
-      .prepare(`SELECT id FROM automation_invocations WHERE automation_id = ? AND trigger_key = ?`)
-      .bind(automationId, triggerKey)
+      .prepare(
+        `SELECT id FROM automation_invocations WHERE automation_id = ? AND trigger_key = ?
+         UNION ALL
+         SELECT invocation_id AS id FROM automation_follow_up_receipts
+         WHERE automation_id = ? AND trigger_key = ? AND accepted_at IS NOT NULL
+         LIMIT 1`
+      )
+      .bind(automationId, triggerKey, automationId, triggerKey)
       .first<{ id: string }>();
     return row?.id ?? null;
+  }
+
+  /** Claim an explicit webhook key before either continuation or invocation work is admitted. */
+  async claimFollowUpReceipt(params: {
+    automationId: string;
+    triggerKey: string;
+    claimInvocationId: string;
+    claimId: string;
+    now: number;
+    expiresAt: number;
+  }): Promise<FollowUpReceiptClaim> {
+    const inserted = await this.db
+      .prepare(
+        `INSERT INTO automation_follow_up_receipts
+           (automation_id, trigger_key, invocation_id, claim_id, claim_invocation_id,
+            claim_expires_at, accepted_at, created_at)
+         VALUES (?, ?, NULL, ?, ?, ?, NULL, ?)
+         ON CONFLICT (automation_id, trigger_key) DO NOTHING`
+      )
+      .bind(
+        params.automationId,
+        params.triggerKey,
+        params.claimId,
+        params.claimInvocationId,
+        params.expiresAt,
+        params.now
+      )
+      .run();
+    if ((inserted.meta?.changes ?? 0) > 0) return { kind: "claimed" };
+
+    const reclaimed = await this.db
+      .prepare(
+        `UPDATE automation_follow_up_receipts
+         SET claim_id = ?, claim_invocation_id = ?, claim_expires_at = ?
+         WHERE automation_id = ? AND trigger_key = ?
+           AND accepted_at IS NULL AND claim_expires_at <= ?`
+      )
+      .bind(
+        params.claimId,
+        params.claimInvocationId,
+        params.expiresAt,
+        params.automationId,
+        params.triggerKey,
+        params.now
+      )
+      .run();
+    if ((reclaimed.meta?.changes ?? 0) > 0) return { kind: "claimed" };
+
+    const owner = await this.db
+      .prepare(
+        `SELECT invocation_id, claim_invocation_id, accepted_at
+         FROM automation_follow_up_receipts
+         WHERE automation_id = ? AND trigger_key = ?`
+      )
+      .bind(params.automationId, params.triggerKey)
+      .first<{
+        invocation_id: string | null;
+        claim_invocation_id: string | null;
+        accepted_at: number | null;
+      }>();
+    if (!owner) throw new Error("Failed to read webhook follow-up claim");
+    const invocationId = owner.invocation_id ?? owner.claim_invocation_id;
+    if (!invocationId) throw new Error("Webhook follow-up claim has no invocation owner");
+    return {
+      kind: owner.accepted_at === null ? "pending" : "accepted",
+      invocationId,
+    };
+  }
+
+  async acceptFollowUpReceipt(
+    automationId: string,
+    triggerKey: string,
+    claimId: string,
+    invocationId: string,
+    acceptedAt: number
+  ): Promise<void> {
+    const result = await this.db
+      .prepare(
+        `UPDATE automation_follow_up_receipts
+         SET invocation_id = ?, claim_id = NULL, claim_invocation_id = NULL,
+             claim_expires_at = NULL, accepted_at = ?
+         WHERE automation_id = ? AND trigger_key = ? AND claim_id = ? AND accepted_at IS NULL`
+      )
+      .bind(invocationId, acceptedAt, automationId, triggerKey, claimId)
+      .run();
+    if ((result.meta?.changes ?? 0) === 0)
+      throw new Error("Failed to accept webhook follow-up receipt claim");
+  }
+
+  async releaseFollowUpReceipt(
+    automationId: string,
+    triggerKey: string,
+    claimId: string
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `DELETE FROM automation_follow_up_receipts
+         WHERE automation_id = ? AND trigger_key = ? AND claim_id = ? AND accepted_at IS NULL`
+      )
+      .bind(automationId, triggerKey, claimId)
+      .run();
   }
 
   /** Sibling-run aggregate for finalization decisions (one query, no stored status). */
@@ -1711,6 +1821,24 @@ export class AutomationStore {
       )
       .bind(automationId, concurrencyKey)
       .first<ContinuableRunRow>();
+  }
+
+  /** Every session previously used by a continuity key, newest first. */
+  async getSessionRunsForContinuityKey(
+    automationId: string,
+    concurrencyKey: string | null
+  ): Promise<Array<{ invocation_id: string; session_id: string }>> {
+    if (concurrencyKey === null) return [];
+    const result = await this.db
+      .prepare(
+        `SELECT r.invocation_id, r.session_id FROM automation_runs r
+         JOIN automation_invocations i ON i.id = r.invocation_id
+         WHERE r.automation_id = ? AND i.concurrency_key = ? AND r.session_id IS NOT NULL
+         ORDER BY r.created_at DESC`
+      )
+      .bind(automationId, concurrencyKey)
+      .all<{ invocation_id: string; session_id: string }>();
+    return result.results || [];
   }
 
   // --- Held continuity prompts ---

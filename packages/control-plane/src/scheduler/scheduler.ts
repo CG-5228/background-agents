@@ -107,6 +107,7 @@ import {
 import type { RequestContext } from "../routes/shared";
 import {
   continueSession,
+  findHistoricalPromptReceipt,
   firstPromptRequestId,
   releaseHeldPrompts,
   steeringActor,
@@ -141,6 +142,9 @@ const TICK_CHILD_LAUNCH_BUDGET = 50;
  * is 10 repositories, so this only caps the per-invocation spike.
  */
 const AUTOMATION_LAUNCH_CONCURRENCY = 4;
+
+/** A crashed follow-up request may be retried after this D1 ownership lease expires. */
+const FOLLOW_UP_RECEIPT_CLAIM_MS = 2 * 60 * 1000;
 
 /** Threshold for detecting orphaned "starting" runs (5 minutes). */
 const ORPHAN_THRESHOLD_MS = 5 * 60 * 1000;
@@ -299,6 +303,7 @@ export class SessionFollowUpRefusedError extends Error {
 interface StartInvocationParams {
   automation: AutomationRow;
   source: AutomationInvocationSource;
+  invocationId?: string;
   /** Human authority used for a manual firing; unattended sources use the automation owner. */
   executionPrincipal?: ExecutionPrincipal;
   /** Cron slot being served — becomes scheduled_at and the idempotency key (schedule source only). */
@@ -306,6 +311,8 @@ interface StartInvocationParams {
   /** Next cron slot, advanced atomically with the insert (schedule source only). */
   advanceToNextRunAt?: number;
   triggerKey?: string | null;
+  /** Finalize a webhook follow-up reservation as soon as its invocation is admitted. */
+  webhookFollowUpClaimId?: string;
   concurrencyKey?: string | null;
   /** Source-specific JSON stored on the invocation (slack message coordinates). */
   triggerMetadata?: string | null;
@@ -325,6 +332,11 @@ interface StartInvocationParams {
    * `instructionsOverride` so admitted children cannot be stranded.
    */
   instructionsOverrideFactory?: () => Promise<string>;
+}
+
+interface WebhookFollowUpClaim {
+  claimId: string;
+  invocationId: string;
 }
 
 interface ExecutionPrincipal {
@@ -528,7 +540,7 @@ export class Scheduler {
       }
     }
 
-    const invocationId = generateId();
+    const invocationId = params.invocationId ?? generateId();
     const scheduledAt = params.scheduledAt ?? now;
 
     const childBase = () => ({
@@ -682,6 +694,27 @@ export class Scheduler {
       // batch's schedule advance already ran (deliberately unconditional), so
       // the skip record must not advance again.
       return this.recordOverlapSkip(store, params, { advanceSchedule: false });
+    }
+
+    if (params.webhookFollowUpClaimId && triggerKey) {
+      try {
+        await store.acceptFollowUpReceipt(
+          automation.id,
+          triggerKey,
+          params.webhookFollowUpClaimId,
+          invocationId,
+          Date.now()
+        );
+      } catch (error) {
+        // The invocation's unique trigger key is already the durable owner; receipt repair
+        // must not strand its admitted children before launch.
+        this.log.warn("Failed to finalize an admitted webhook follow-up receipt", {
+          event: "scheduler.webhook_receipt_finalize_failed",
+          automation_id: automation.id,
+          invocation_id: invocationId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
     }
 
     let attributionError: unknown;
@@ -1258,6 +1291,13 @@ export class Scheduler {
     let slackSessionInstructions: string | undefined;
     let slackSettingsLoaded = false;
     const continuity = this.continuityDeps(store);
+    const webhookFollowUpTriggerKey =
+      event.source === "webhook" && event.sessionKey && event.triggerKey.startsWith("webhook:idem:")
+        ? event.triggerKey
+        : null;
+    const webhookFollowUpRequestId = webhookFollowUpTriggerKey
+      ? `webhook:${await hashToken(webhookFollowUpTriggerKey)}`
+      : null;
     const recordContinuation = (
       outcome: Extract<ContinuationOutcome, { kind: "steered" | "skipped" }>
     ): void => {
@@ -1271,12 +1311,65 @@ export class Scheduler {
 
     for (const automation of candidates) {
       const now = Date.now();
+      let webhookClaim: WebhookFollowUpClaim | null = null;
+      const releaseWebhookClaim = async (): Promise<void> => {
+        if (webhookClaim) {
+          await store.releaseFollowUpReceipt(automation.id, event.triggerKey, webhookClaim.claimId);
+        }
+      };
 
-      if (event.source === "webhook" && event.sessionKey) {
-        const original = await store.getInvocationIdByTriggerKey(automation.id, event.triggerKey);
+      if (webhookFollowUpTriggerKey) {
+        const original = await store.getInvocationIdByTriggerKey(
+          automation.id,
+          webhookFollowUpTriggerKey
+        );
         if (original) {
           invocationIds.push(original);
           skipped++;
+          continue;
+        }
+
+        const claimId = generateId();
+        const invocationId = generateId();
+        const claim = await store.claimFollowUpReceipt({
+          automationId: automation.id,
+          triggerKey: webhookFollowUpTriggerKey,
+          claimInvocationId: invocationId,
+          claimId,
+          now,
+          expiresAt: now + FOLLOW_UP_RECEIPT_CLAIM_MS,
+        });
+        if (claim.kind === "accepted") {
+          invocationIds.push(claim.invocationId);
+          skipped++;
+          continue;
+        }
+        if (claim.kind === "pending") {
+          throw new SessionFollowUpRefusedError({
+            kind: "refused",
+            invocationId: claim.invocationId,
+            status: null,
+            code: null,
+          });
+        }
+        webhookClaim = { claimId, invocationId };
+
+        const historical = await findHistoricalPromptReceipt(
+          continuity,
+          automation,
+          event.concurrencyKey,
+          webhookFollowUpRequestId!
+        );
+        if (historical.kind === "refused") throw new SessionFollowUpRefusedError(historical);
+        if (historical.kind === "skipped" && historical.invocationId) {
+          await store.acceptFollowUpReceipt(
+            automation.id,
+            webhookFollowUpTriggerKey,
+            claimId,
+            historical.invocationId,
+            now
+          );
+          recordContinuation(historical);
           continue;
         }
       }
@@ -1311,6 +1404,7 @@ export class Scheduler {
       try {
         config = parseAutomationTriggerFields(automation).triggerConfig ?? { conditions: [] };
       } catch {
+        await releaseWebhookClaim();
         this.log.error("Skipped automation with invalid stored trigger fields", {
           event: "scheduler.invalid_trigger_fields",
           automation_id: automation.id,
@@ -1319,6 +1413,7 @@ export class Scheduler {
         continue;
       }
       if (!matchesConditions(config.conditions, event, conditionRegistry)) {
+        await releaseWebhookClaim();
         continue;
       }
 
@@ -1328,7 +1423,13 @@ export class Scheduler {
           automation,
           event.concurrencyKey,
           now,
-          this.webhookContinuation(event, automation, store)
+          await this.webhookContinuation(
+            event,
+            automation,
+            store,
+            webhookClaim,
+            webhookFollowUpRequestId
+          )
         );
         if (outcome.kind === "refused") throw new SessionFollowUpRefusedError(outcome);
         if (outcome.kind !== "fall_through") {
@@ -1356,6 +1457,8 @@ export class Scheduler {
       const result = await this.startInvocation(store, {
         automation,
         source: "event",
+        invocationId: webhookClaim?.invocationId,
+        webhookFollowUpClaimId: webhookClaim?.claimId,
         triggerKey: event.triggerKey,
         concurrencyKey: event.concurrencyKey,
         triggerMetadata: event.source === "slack" ? serializeSlackTriggerMetadata(event) : null,
@@ -1367,6 +1470,19 @@ export class Scheduler {
             }
           : {}),
       });
+      if (webhookClaim) {
+        if (result.outcome === "deduplicated" && result.invocationId) {
+          await store.acceptFollowUpReceipt(
+            automation.id,
+            event.triggerKey,
+            webhookClaim.claimId,
+            result.invocationId,
+            Date.now()
+          );
+        } else if (result.outcome !== "started") {
+          await releaseWebhookClaim();
+        }
+      }
       const invocationId = firingInvocationId(result);
       if (invocationId) invocationIds.push(invocationId);
 
@@ -2084,13 +2200,30 @@ export class Scheduler {
    * next turn of the session, sent as the automation's executor (whom the run acts as).
    * No callback context, so the run's own status is untouched.
    */
-  private webhookContinuation(
+  private async webhookContinuation(
     event: WebhookAutomationEvent,
     automation: AutomationRow,
-    store: AutomationStore
-  ): ContinuationPolicy {
+    store: AutomationStore,
+    claim: WebhookFollowUpClaim | null,
+    requestId: string | null
+  ): Promise<ContinuationPolicy> {
+    const clientRequestId = requestId ?? `webhook:${await hashToken(event.triggerKey)}`;
     return {
       source: "webhook",
+      acceptDelivery: claim
+        ? async (run) => {
+            await store.acceptFollowUpReceipt(
+              automation.id,
+              event.triggerKey,
+              claim.claimId,
+              run.invocation_id,
+              Date.now()
+            );
+          }
+        : undefined,
+      releaseDelivery: claim
+        ? () => store.releaseFollowUpReceipt(automation.id, event.triggerKey, claim.claimId)
+        : undefined,
       resolveActor: async () => {
         const owner = await store.resolveCanonicalOwner(automation);
         return owner.user_id
@@ -2110,7 +2243,7 @@ export class Scheduler {
           canonicalUserId: actor.userId,
           source: "automation",
           // Hashed so the id fits clientRequestIdSchema's 128-character limit.
-          clientRequestId: `webhook:${await hashToken(event.triggerKey)}`,
+          clientRequestId,
         },
         ctx: { trace_id: `automation:${automation.id}`, request_id: event.triggerKey },
       }),
