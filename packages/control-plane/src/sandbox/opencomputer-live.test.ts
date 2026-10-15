@@ -2,6 +2,7 @@ import { Sandbox } from "@opencomputer/sdk";
 import { expect, it, onTestFinished } from "vitest";
 import { OpenComputerRestClient } from "./opencomputer-rest-client";
 import { OpenComputerSandboxProvider } from "./providers/opencomputer-provider";
+import { cleanupOpenComputerCanary } from "../../test/helpers/opencomputer-canary";
 
 // Explicit opt-in: this allocates paid provider resources and needs a rebuilt
 // managed template. No model credentials or real control-plane connection are used.
@@ -32,7 +33,6 @@ it.skipIf(process.env.OPENCOMPUTER_RUN_LIVE_TESTS !== "1")(
       branch: "main",
     };
     const ids: string[] = [];
-    const checkpoints: string[] = [];
     const paths = [`/workspace/${sessionId}`, `/home/sandbox/${sessionId}`];
     const write = paths.map((path) => `printf '%s' '${sessionId}' > '${path}'`).join(" && ");
     const verify = paths.map((path) => `test "$(cat '${path}')" = '${sessionId}'`).join(" && ");
@@ -41,36 +41,12 @@ it.skipIf(process.env.OPENCOMPUTER_RUN_LIVE_TESTS !== "1")(
       const result = await sandbox.exec.run(command, { timeout: 60, timeoutMs: 90_000 });
       expect(result.exitCode, result.stderr).toBe(0);
     };
-    onTestFinished(async () => {
-      const cleanup = await Promise.allSettled(
-        checkpoints.map((checkpointId) => client.deleteCheckpoint(ids[0], checkpointId))
-      );
-      cleanup.push(
-        ...(await Promise.allSettled(
-          ids.map(async (providerObjectId) => {
-            const result = await provider.stopSandbox({
-              sessionId,
-              providerObjectId,
-              reason: "canary_cleanup",
-              intent: "destroy",
-            });
-            if (!result.success) throw new Error(result.error ?? "Canary cleanup failed");
-          })
-        ))
-      );
-      const failures = cleanup.flatMap((result) =>
-        result.status === "rejected" ? [result.reason] : []
-      );
-      if (failures.length) throw new AggregateError(failures, "OpenComputer canary cleanup failed");
-    }, 330_000);
+    onTestFinished(() => cleanupOpenComputerCanary(client, provider, ids, sessionId), 330_000);
     const created = await provider.createSandbox(launch);
     expect(created.providerObjectId).toBeTruthy();
     ids.push(created.providerObjectId!);
     expect(created.lifetime).toMatchObject({ kind: "finite", source: "provider" });
-    await exec(
-      ids[0],
-      "sudo -E /opt/openinspect/python/bin/python /app/verify/smoke_test.py verify"
-    );
+    await exec(ids[0], "/opt/openinspect/python/bin/python /app/verify/smoke_test.py verify");
     await exec(ids[0], write);
     const checkpoint = await provider.takeSnapshot({
       sessionId,
@@ -78,7 +54,6 @@ it.skipIf(process.env.OPENCOMPUTER_RUN_LIVE_TESTS !== "1")(
       reason: "shutdown_canary",
     });
     const checkpointId = checkpoint.imageId;
-    if (checkpointId) checkpoints.push(checkpointId);
     expect(checkpoint.success, checkpoint.error).toBe(true);
     expect(checkpointId).toBeTruthy();
     expect(

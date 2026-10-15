@@ -17,18 +17,44 @@ active runtime. OpenComputer keeps the existing `/api` routes; changing the URL 
 migration. The builder requires `endAt` on its verification sandbox before publishing the template
 reference. An organization runtime pin can override version-based routing.
 
-**The managed image still needs substrate compatibility work before production enablement.**
-OpenComputer's [template documentation](https://docs.opencomputer.dev/sandboxes/templates) describes
-Amazon Linux 2023 on ARM64. Our OpenComputer target in `packages/sandbox-images/targets.json` still
-selects Debian, and `install/install.sh` requires linux/amd64. The language and tool installers also
-pin amd64 archives, including Chrome for Testing. Upgrading the SDK does not resolve these image
-constraints. Do not switch the default provider on the strength of local HTTP contract tests.
+The managed image targets Amazon Linux 2023 on ARM64, as specified in the pinned upstream
+[template documentation](https://github.com/diggerhq/opencomputer/blob/2a2462682589e9e327966a936ae0075528894a92/docs-sandbox/sandboxes/templates.mdx).
+Image planning selects SHA-256-pinned ARM64 archives for Node, uv, agent-browser, code-server, ttyd,
+Codex and Chrome. The existing amd64 pins remain unchanged. The old Chrome 152 pin has no Linux
+ARM64 download in Google's release manifest; ARM64 uses Chrome for Testing 155.0.8059.79 instead.
+The browser configuration follows the stable `/usr/local/bin/google-chrome` link. OpenComputer sets
+`--no-sandbox --disable-dev-shm-usage` explicitly: the guest cannot elevate and agent-browser's
+container detection does not identify this MicroVM. No browser emulation or unpinned browser
+package-manager fallback is used.
 
-The [upstream migration guide](https://docs.opencomputer.dev/migrating-from-v1) also documents
-filesystem-only checkpoints, a hard host lifetime reported in `endAt`, and unavailable checkpoint
-forking. The provider uses disk-only captures, creates a replacement from the managed template,
-restores the checkpoint in place, and starts the runtime again. Hibernation does not extend the host
-lifetime. Old v1 templates must be rebuilt; existing names alone do not establish compatibility.
+Amazon Linux installation supports the provider's DNF without depending on DNF4's config-manager
+flags. The OpenComputer image builds a small recording toolchain from pinned FFmpeg, x264 and libvpx
+sources. Native image verification encodes H.264 MP4 and VP8 WebM files, the formats used by
+agent-browser's recorder. The CI reference-image matrix includes native ARM64/Amazon Linux; it
+complements the existing amd64 builds and does not replace a provider rebuild or production canary.
+
+The
+[pinned upstream migration guide](https://github.com/diggerhq/opencomputer/blob/2a2462682589e9e327966a936ae0075528894a92/docs-sandbox/migrating-from-v1.mdx)
+also documents filesystem-only checkpoints, a hard host lifetime reported in `endAt`, and
+unavailable checkpoint forking. The provider uses disk-only captures, creates a replacement from the
+managed template, restores the checkpoint in place, and starts the runtime again. Hibernation does
+not extend the host lifetime. Old v1 templates must be rebuilt; existing names alone do not
+establish compatibility.
+
+v2 sandbox commands run unprivileged and cannot elevate through `sudo`. Runtime launch uses the
+Amazon Linux system CA bundle plus the provider's optional proxy CA in a user-writable bundle, and
+logs to `/home/sandbox/.cache/openinspect/runtime.log` (also linked from
+`/tmp/openinspect-runtime.log`). Image verification runs as the sandbox user.
+
+Checkpoint archives contain `/home/sandbox` only. The managed image makes `/workspace` a symlink to
+`/home/sandbox/workspace`, so repository state is captured without changing application paths.
+Installations or data written outside that home at session runtime are not checkpointed; system
+tools installed during the base image build are retained by the template. See the pinned upstream
+[checkpoint implementation](https://github.com/diggerhq/opencomputer/blob/2a2462682589e9e327966a936ae0075528894a92/cmd/microvm-hooks/oc_workspace.go).
+
+Production template rebuilding, a deployed session handshake and the production shutdown canary
+remain unverified until run with provider credentials. Do not switch the default provider based only
+on local contract results.
 
 ### Provider Canary
 

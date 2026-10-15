@@ -28,7 +28,7 @@ const config = {
 
 describe("OpenComputer v2 routing contract", () => {
   const requests: { path: string; method: string; body: Record<string, unknown> }[] = [];
-  let state: string;
+  const sandboxes = new Map<string, { status: string; checkpointId?: string }>();
   let nextId: number;
   let endAt: string | undefined;
 
@@ -41,7 +41,7 @@ describe("OpenComputer v2 routing contract", () => {
     vi.stubEnv("OPENCOMPUTER_DISABLE_HTTP2", "1");
     vi.stubEnv("OPENCOMPUTER_DISABLE_PREWARM", "1");
     requests.length = 0;
-    state = "running";
+    sandboxes.clear();
     nextId = 0;
     endAt = "2032-01-01T00:00:00Z";
     vi.stubGlobal(
@@ -63,30 +63,42 @@ describe("OpenComputer v2 routing contract", () => {
           return method === "GET" ? json([]) : json({ name: "candidate", status: "ready" });
         }
         if (path === "/api/secret-stores") return json({ id: "store-1", name: "test-store" });
-        if (path.endsWith("/exec/run-async")) return json({}, 404);
-        if (path.endsWith("/exec/run"))
-          return json({ exitCode: 0, stdout: "verified", stderr: "" });
-        if (path.endsWith("/checkpoints")) {
-          return json({ id: "checkpoint-1", sandboxId: "sb-1", status: "ready" });
-        }
-        if (path.endsWith("/restore")) return json({});
-        if (path.endsWith("/hibernate")) {
-          state = "hibernated";
-          return json({});
-        }
-        if (path.endsWith("/wake")) {
-          state = "running";
-          return new Response(null, { status: 204 });
-        }
         if (path === "/api/sandboxes" && method === "POST") {
           nextId += 1;
-          state = "running";
-          return json({ sandboxID: `sb-${nextId}`, status: state, endAt });
+          const id = `sb-${nextId}`;
+          sandboxes.set(id, { status: "running" });
+          return json({ sandboxID: id, status: "running", endAt });
         }
-        if (path.startsWith("/api/sandboxes/") && method === "GET") {
-          return json({ sandboxID: `sb-${nextId}`, status: state, endAt: "2032-01-01T00:00:00Z" });
+        const route = path.match(/^\/api\/sandboxes\/([^/]+)(.*)$/);
+        if (route) {
+          const [, id, operation] = route;
+          const sandbox = sandboxes.get(id);
+          if (!sandbox) return json({ error: "sandbox not found" }, 404);
+          if (!operation && method === "GET")
+            return json({ sandboxID: id, status: sandbox.status, endAt });
+          if (!operation && method === "DELETE") {
+            sandboxes.delete(id);
+            return json({});
+          }
+          if (operation === "/exec/run-async") return json({}, 404);
+          if (operation === "/exec/run")
+            return json({ exitCode: 0, stdout: "verified", stderr: "" });
+          if (operation === "/checkpoints" && method === "POST") {
+            return json({ id: "checkpoint-1", sandboxId: id, status: "ready" });
+          }
+          if (operation === "/checkpoints/checkpoint-1/restore" && method === "POST") {
+            sandbox.checkpointId = "checkpoint-1";
+            return json({});
+          }
+          if (operation === "/hibernate") {
+            sandbox.status = "hibernated";
+            return json({});
+          }
+          if (operation === "/wake") {
+            sandbox.status = "running";
+            return new Response(null, { status: 204 });
+          }
         }
-        if (method === "DELETE") return json({});
         throw new Error(`Unexpected OpenComputer request: ${method} ${path}`);
       })
     );
@@ -105,6 +117,13 @@ describe("OpenComputer v2 routing contract", () => {
     expect(requests).toContainEqual(
       expect.objectContaining({ path: "/api/snapshots", method: "POST" })
     );
+    const manifest = JSON.stringify(
+      requests.find(({ path, method }) => path === "/api/snapshots" && method === "POST")?.body
+        .image
+    );
+    expect(manifest).toContain("/etc/pki/tls/certs/ca-bundle.crt");
+    expect(manifest).not.toContain("sudo");
+    expect(manifest).not.toContain("/etc/resolv.conf");
     expect(requests).toContainEqual(
       expect.objectContaining({
         path: "/api/sandboxes",
@@ -156,6 +175,8 @@ describe("OpenComputer v2 routing contract", () => {
       snapshotImageId: checkpoint.imageId!,
     });
     expect(restored.success).toBe(true);
+    expect(sandboxes.get("sb-2")?.checkpointId).toBe("checkpoint-1");
+    expect(sandboxes.get("sb-1")?.checkpointId).toBeUndefined();
     expect(
       await provider.stopSandbox({
         sessionId: launch.sessionId,
@@ -167,8 +188,8 @@ describe("OpenComputer v2 routing contract", () => {
     expect(requests.filter(({ path }) => path.endsWith("/checkpoints"))[0].body).toMatchObject({
       kind: "disk_only",
     });
-    const restoreIndex = requests.findIndex(({ path }) =>
-      path.endsWith("/checkpoints/checkpoint-1/restore")
+    const restoreIndex = requests.findIndex(
+      ({ path }) => path === "/api/sandboxes/sb-2/checkpoints/checkpoint-1/restore"
     );
     expect(restoreIndex).toBeGreaterThan(0);
     expect(requests.slice(restoreIndex + 1)).toContainEqual(
