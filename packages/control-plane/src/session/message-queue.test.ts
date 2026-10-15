@@ -4,6 +4,10 @@ import { SessionMessageQueue } from "./message-queue";
 import { fingerprintWebPrompt, SessionPromptAdmission } from "./prompt-admission";
 import { SessionClientCommandFacade } from "./client-command-facade";
 import { AttachmentClaimConflictError } from "./session-attachment-repository";
+import type { SessionAttachmentRepository } from "./session-attachment-repository";
+import type { ParticipantRepository } from "./participant-repository";
+import type { ParticipantService } from "./participant-service";
+import type { SessionIndexStore } from "../db/session-index";
 import {
   serverMessageSchema,
   type ServerMessage,
@@ -249,14 +253,14 @@ function buildQueue(
   const admission = new SessionPromptAdmission(
     backgroundTasks,
     log,
-    sessionRepository,
-    repository,
-    participantRepository,
-    attachmentRepository,
-    participantService,
-    sessionStatus,
+    sessionRepository as unknown as SessionCoreRepository,
+    repository as unknown as MessageRepository,
+    participantRepository as unknown as ParticipantRepository,
+    attachmentRepository as unknown as SessionAttachmentRepository,
+    participantService as unknown as ParticipantService,
+    sessionStatus as unknown as SessionStatusService,
     messenger,
-    sessionIndex,
+    sessionIndex as unknown as SessionIndexStore,
     policy
   );
 
@@ -289,14 +293,14 @@ function buildQueue(
   const queue: SessionMessageQueue = new SessionMessageQueue(
     backgroundTasks,
     log,
-    sessionRepository,
-    repository,
-    participantRepository,
-    wsManager,
+    sessionRepository as unknown as SessionCoreRepository,
+    repository as unknown as MessageRepository,
+    participantRepository as unknown as ParticipantRepository,
+    wsManager as unknown as SessionWebSocketManager,
     messenger,
-    participantService,
-    callbackService,
-    sessionStatus,
+    participantService as unknown as ParticipantService,
+    callbackService as unknown as CallbackNotificationService,
+    sessionStatus as unknown as SessionStatusService,
     policy,
     messageFailures,
     sandboxLifecycle,
@@ -309,7 +313,7 @@ function buildQueue(
     {} as never,
     queue,
     admission,
-    wsManager,
+    wsManager as unknown as SessionWebSocketManager,
     () => executionStop.stop(),
     {} as never,
     {} as never

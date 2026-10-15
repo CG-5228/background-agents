@@ -34,9 +34,9 @@ function createFacade(recover?: (action: ShutdownRecoveryAction) => Promise<void
   const sockets = { send: vi.fn<SessionWebSocketManager["send"]>(() => true) };
   const facade = new SessionClientCommandFacade(
     {} as never,
-    prompts,
-    admission,
-    sockets,
+    prompts as unknown as SessionMessageQueue,
+    admission as unknown as SessionPromptAdmission,
+    sockets as unknown as SessionWebSocketManager,
     vi.fn(async () => {}),
     {} as never,
     {} as never,

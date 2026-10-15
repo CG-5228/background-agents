@@ -42,8 +42,8 @@ interface MessageServiceDeps {
   eventRepository: EventRepository;
   artifactRepository: ArtifactRepository;
   usageRepository: UsageRepository;
-  messageQueue: Pick<SessionMessageQueue, "processMessageQueue">;
-  promptAdmission: Pick<SessionPromptAdmission, "enqueueFromApi">;
+  messageQueue: SessionMessageQueue;
+  promptAdmission: SessionPromptAdmission;
   stopExecution: () => Promise<void>;
   parseArtifactMetadata: (
     artifact: Pick<ArtifactRow, "id" | "metadata">

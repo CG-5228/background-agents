@@ -102,7 +102,7 @@ function buildAdmission() {
   } satisfies BackgroundTasks;
   const repository = {
     getSession: vi.fn<SessionCoreRepository["getSession"]>(() => session),
-  } satisfies Pick<SessionCoreRepository, "getSession">;
+  };
   const messageRepository = {
     getPendingOrProcessingCount: vi.fn<MessageRepository["getPendingOrProcessingCount"]>(
       () => messages.length
@@ -139,46 +139,37 @@ function buildAdmission() {
       }
     ),
     listPromptQueue: vi.fn<MessageRepository["listPromptQueue"]>(() => []),
-  } satisfies Pick<
-    MessageRepository,
-    | "getPendingOrProcessingCount"
-    | "getMessageByClientRequestId"
-    | "getUnfinishedMessagePosition"
-    | "createMessageWithAttachments"
-    | "listPromptQueue"
-  >;
+  };
   const participantRepository = {
     getParticipantById: vi.fn<ParticipantRepository["getParticipantById"]>(() => participant),
     updateParticipantCoalesce: vi.fn<ParticipantRepository["updateParticipantCoalesce"]>(),
     updateParticipantIdentity: vi.fn<ParticipantRepository["updateParticipantIdentity"]>(),
-  } satisfies Pick<
-    ParticipantRepository,
-    "getParticipantById" | "updateParticipantCoalesce" | "updateParticipantIdentity"
-  >;
+  };
   const attachmentRepository = {
     getUnreferenced: vi.fn<SessionAttachmentRepository["getUnreferenced"]>(() => []),
-  } satisfies Pick<SessionAttachmentRepository, "getUnreferenced">;
+  };
   const participantService = {
     getByUserId: vi.fn<ParticipantService["getByUserId"]>(() => participant),
     create: vi.fn<ParticipantService["create"]>(() => participant),
-  } satisfies Pick<ParticipantService, "getByUserId" | "create">;
+  };
   const sessionStatus = {
     transition: vi.fn<SessionStatusService["transition"]>(async () => {
       events.push("transition");
       return false;
     }),
-  } satisfies Pick<SessionStatusService, "transition">;
+  };
   const messenger = {
+    sendToSandbox: vi.fn<SessionMessenger["sendToSandbox"]>(),
     broadcast: vi.fn<SessionMessenger["broadcast"]>(() => {
       events.push("broadcast");
     }),
-  } satisfies Pick<SessionMessenger, "broadcast">;
+  } satisfies SessionMessenger;
   const sessionIndex = {
     touchUpdatedAt: vi.fn<SessionIndexStore["touchUpdatedAt"]>(async () => {
       events.push("activity");
       return true;
     }),
-  } satisfies Pick<SessionIndexStore, "touchUpdatedAt">;
+  };
   const policy = {
     getProviderAuthenticationError: vi.fn<PromptPolicy["getProviderAuthenticationError"]>(
       async () => null
@@ -188,14 +179,14 @@ function buildAdmission() {
   const admission = new SessionPromptAdmission(
     backgroundTasks,
     log,
-    repository,
-    messageRepository,
-    participantRepository,
-    attachmentRepository,
-    participantService,
-    sessionStatus,
+    repository as unknown as SessionCoreRepository,
+    messageRepository as unknown as MessageRepository,
+    participantRepository as unknown as ParticipantRepository,
+    attachmentRepository as unknown as SessionAttachmentRepository,
+    participantService as unknown as ParticipantService,
+    sessionStatus as unknown as SessionStatusService,
     messenger,
-    sessionIndex,
+    sessionIndex as unknown as SessionIndexStore,
     policy
   );
   return {

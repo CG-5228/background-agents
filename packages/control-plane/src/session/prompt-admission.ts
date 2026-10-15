@@ -106,24 +106,14 @@ export class SessionPromptAdmission {
   constructor(
     private readonly backgroundTasks: BackgroundTasks,
     private readonly log: Logger,
-    private readonly repository: Pick<SessionCoreRepository, "getSession">,
-    private readonly messageRepository: Pick<
-      MessageRepository,
-      | "getPendingOrProcessingCount"
-      | "getMessageByClientRequestId"
-      | "getUnfinishedMessagePosition"
-      | "createMessageWithAttachments"
-      | "listPromptQueue"
-    >,
-    private readonly participantRepository: Pick<
-      ParticipantRepository,
-      "getParticipantById" | "updateParticipantCoalesce" | "updateParticipantIdentity"
-    >,
-    private readonly attachmentRepository: Pick<SessionAttachmentRepository, "getUnreferenced">,
-    private readonly participantService: Pick<ParticipantService, "getByUserId" | "create">,
-    private readonly sessionStatus: Pick<SessionStatusService, "transition">,
-    private readonly messenger: Pick<SessionMessenger, "broadcast">,
-    private readonly sessionIndex: Pick<SessionIndexStore, "touchUpdatedAt">,
+    private readonly repository: SessionCoreRepository,
+    private readonly messageRepository: MessageRepository,
+    private readonly participantRepository: ParticipantRepository,
+    private readonly attachmentRepository: SessionAttachmentRepository,
+    private readonly participantService: ParticipantService,
+    private readonly sessionStatus: SessionStatusService,
+    private readonly messenger: SessionMessenger,
+    private readonly sessionIndex: SessionIndexStore,
     private readonly policy: PromptPolicy
   ) {}
 

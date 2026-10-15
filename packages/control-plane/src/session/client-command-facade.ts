@@ -43,12 +43,9 @@ export class SessionClientCommandFacade implements SessionClientCommands<
 > {
   constructor(
     private readonly authenticator: SessionConnectionAuthenticator,
-    private readonly prompts: Pick<
-      SessionMessageQueue,
-      "processMessageQueue" | "cancelQueuedPrompt"
-    >,
-    private readonly admission: Pick<SessionPromptAdmission, "enqueueFromWeb">,
-    private readonly sockets: Pick<SessionWebSocketManager, "send">,
+    private readonly prompts: SessionMessageQueue,
+    private readonly admission: SessionPromptAdmission,
+    private readonly sockets: SessionWebSocketManager,
     private readonly stop: () => Promise<void>,
     private readonly presence: PresenceService,
     private readonly events: SessionEventStream,

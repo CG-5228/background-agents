@@ -78,47 +78,20 @@ export class SessionMessageQueue {
   constructor(
     private readonly backgroundTasks: BackgroundTasks,
     private readonly log: Logger,
-    private readonly repository: Pick<SessionCoreRepository, "getSession">,
-    private readonly messageRepository: Pick<
-      MessageRepository,
-      | "admitAutofixMessage"
-      | "getAutofixMessageId"
-      | "getMessageStatus"
-      | "cancelPendingMessage"
-      | "getMessageAwaitingStopConfirmation"
-      | "getProcessingMessage"
-      | "getNextPendingMessage"
-      | "startMessageProcessing"
-      | "updateMessageToPending"
-      | "listPendingMessagesWithCreatedAt"
-      | "getProcessingMessageWithCreatedAt"
-      | "getMessageById"
-      | "listPromptQueue"
-    >,
-    private readonly participantRepository: Pick<
-      ParticipantRepository,
-      "getParticipantById" | "updateParticipantCoalesce"
-    >,
-    private readonly wsManager: Pick<
-      SessionWebSocketManager,
-      "getSandboxCommandTarget" | "getSandboxSocket" | "send"
-    >,
-    private readonly messenger: Pick<SessionMessenger, "broadcast">,
-    private readonly participantService: Pick<ParticipantService, "getByUserId" | "create">,
-    private readonly callbackService: Pick<CallbackNotificationService, "notifyStarted">,
-    private readonly sessionStatus: Pick<
-      SessionStatusService,
-      "transition" | "reconcileAfterQueueRemoval" | "reconcileAfterExecution"
-    >,
+    private readonly repository: SessionCoreRepository,
+    private readonly messageRepository: MessageRepository,
+    private readonly participantRepository: ParticipantRepository,
+    private readonly wsManager: SessionWebSocketManager,
+    private readonly messenger: SessionMessenger,
+    private readonly participantService: ParticipantService,
+    private readonly callbackService: CallbackNotificationService,
+    private readonly sessionStatus: SessionStatusService,
     private readonly policy: PromptPolicy,
-    private readonly messageFailures: Pick<MessageFailureService, "record" | "deliver">,
+    private readonly messageFailures: MessageFailureService,
     private readonly sandboxLifecycle: SandboxLifecycle,
     private readonly scmProvider: SourceControlProviderName,
     private readonly alarmScheduler: AlarmScheduler,
-    private readonly executionStop: Pick<
-      ExecutionStopCoordinator,
-      "recoverStopConfirmationTimeout" | "resumeAfterSandboxTermination"
-    >,
+    private readonly executionStop: ExecutionStopCoordinator,
     /** Resolved per use so it honors settings persisted after construction. */
     private readonly getExecutionTimeoutMs: () => number
   ) {}

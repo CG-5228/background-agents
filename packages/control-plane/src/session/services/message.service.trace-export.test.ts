@@ -4,6 +4,8 @@ import { createNodeSqlStorage } from "../../node/sqlite-storage";
 import { ArtifactRepository } from "../artifact-repository";
 import { MAX_INCLUDED_BYTES_PER_SESSION, sessionTraceExportSchema } from "../contracts";
 import { EventRepository } from "../event-repository";
+import type { SessionMessageQueue } from "../message-queue";
+import type { SessionPromptAdmission } from "../prompt-admission";
 import { MessageRepository } from "../message-repository";
 import { initSchema } from "../schema";
 import { SessionAttachmentRepository } from "../session-attachment-repository";
@@ -54,8 +56,8 @@ describe("MessageService.exportTrace", () => {
       eventRepository: events,
       artifactRepository: new ArtifactRepository(storage.sql),
       usageRepository: usage,
-      messageQueue: { processMessageQueue: vi.fn() },
-      promptAdmission: { enqueueFromApi: vi.fn() },
+      messageQueue: { processMessageQueue: vi.fn() } as unknown as SessionMessageQueue,
+      promptAdmission: { enqueueFromApi: vi.fn() } as unknown as SessionPromptAdmission,
       stopExecution: vi.fn(),
       parseArtifactMetadata: vi.fn(),
       transaction,
