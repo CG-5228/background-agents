@@ -224,6 +224,9 @@ def test_language_and_tool_installers_extract_the_selected_archives(
         "OI_INSTALL_DIR": str(install),
         "OI_BUNDLE": str(bundle),
         "OI_ARCH": arch,
+        "PYTHON_VERSION": json.loads((ROOT / "packages/sandbox-images/toolchain.json").read_text())[
+            "python"
+        ],
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
     }
     for name, (url, members) in definitions.items():
