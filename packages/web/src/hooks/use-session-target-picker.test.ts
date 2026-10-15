@@ -908,6 +908,50 @@ describe("repository home target", () => {
     });
   });
 
+  it.each([null, "env-1"])(
+    "restores normal preferences on an in-place home exit with default %s",
+    (defaultEnvironmentId) => {
+      localStorage.setItem("open-inspect-last-selected-repo", "acme/web");
+      const { result, rerender } = renderHook(
+        ({ lockedRepoFullName }: { lockedRepoFullName: string | null }) =>
+          useSessionTargetPicker({ lockedRepoFullName, defaultEnvironmentId }),
+        { initialProps: { lockedRepoFullName: "group/subgroup/site" as string | null } }
+      );
+      act(() => result.current.pickerProps.setSelectedBranch("campaign"));
+      expect(localStorage.getItem("open-inspect-last-selected-repo")).toBe("acme/web");
+      rerender({ lockedRepoFullName: null });
+      expect(result.current.buildRequestFields()).toEqual(
+        defaultEnvironmentId
+          ? { environmentId: defaultEnvironmentId }
+          : { repoOwner: "acme", repoName: "web", branch: "main" }
+      );
+      expect(localStorage.getItem("open-inspect-last-selected-repo")).toBe(
+        defaultEnvironmentId ? `env:${defaultEnvironmentId}` : "acme/web"
+      );
+    }
+  );
+
+  it("does not persist a locked target while catalogs reload on exit", () => {
+    localStorage.setItem("open-inspect-last-selected-repo", "acme/web");
+    const catalog = mocks.repos();
+    const { result, rerender } = renderHook(
+      ({ lockedRepoFullName }: { lockedRepoFullName: string | null }) =>
+        useSessionTargetPicker({ lockedRepoFullName }),
+      { initialProps: { lockedRepoFullName: "group/subgroup/site" as string | null } }
+    );
+    mocks.repos.mockReturnValue({ ...catalog, loading: true });
+    rerender({ lockedRepoFullName: null });
+    expect(result.current.buildRequestFields()).toBeNull();
+    expect(localStorage.getItem("open-inspect-last-selected-repo")).toBe("acme/web");
+    mocks.repos.mockReturnValue(catalog);
+    rerender({ lockedRepoFullName: null });
+    expect(result.current.buildRequestFields()).toEqual({
+      repoOwner: "acme",
+      repoName: "web",
+      branch: "main",
+    });
+  });
+
   it("never falls back to another target when the home repository is unavailable", () => {
     const { result } = renderHook(() =>
       useSessionTargetPicker({ lockedRepoFullName: "acme/missing" })

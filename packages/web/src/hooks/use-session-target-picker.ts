@@ -184,6 +184,15 @@ export function useSessionTargetPicker({
   const [selectionContext, setSelectionContext] = useState({ teamId, defaultEnvironmentId });
   const [hasExplicitSelection, setHasExplicitSelection] = useState(false);
   const [selectionInvalidated, setSelectionInvalidated] = useState(false);
+  const [selectionHome, setSelectionHome] = useState(lockedRepoFullName);
+  // Reset before effects can launch or persist a draft from the previous home.
+  if (selectionHome !== lockedRepoFullName) {
+    setSelectionHome(lockedRepoFullName);
+    setSessionTarget(null);
+    updateSelectedBranch("");
+    setHasExplicitSelection(false);
+    setSelectionInvalidated(false);
+  }
   const targetCatalogError =
     draftTarget?.kind === "environment"
       ? environmentsError

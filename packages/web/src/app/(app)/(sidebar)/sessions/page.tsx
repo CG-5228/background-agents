@@ -63,10 +63,11 @@ function SessionsContent() {
     () => ({ teamIds: activeTeamId ? [activeTeamId] : undefined, scope: activeTeamScope }),
     [activeTeamId, activeTeamScope]
   );
-  const parsed = useMemo(
-    () => parseSessionDiscoveryQuery(new URLSearchParams(searchParams.toString())),
-    [searchParams]
-  );
+  const parsed = useMemo(() => {
+    const filters = new URLSearchParams(searchParams.toString());
+    filters.delete("homeRepo"); // Navigation scope is not a discovery filter.
+    return parseSessionDiscoveryQuery(filters);
+  }, [searchParams]);
   const query = useMemo(() => {
     if (!parsed.success) return DEFAULT_SESSION_DISCOVERY_QUERY;
     return parsed.data.teamIds || parsed.data.scope

@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 /// <reference types="@testing-library/jest-dom" />
 
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  within,
+} from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionListItem } from "@/lib/session-list";
@@ -9,6 +17,8 @@ import type * as ActiveTeam from "@/hooks/use-active-team";
 import { ActiveTeamProvider } from "@/hooks/use-active-team";
 import { DEFAULT_SESSION_DISCOVERY_QUERY } from "@/lib/session-discovery";
 import SessionsPage from "./page";
+import { RepositoryHomeProvider, useRepositoryHome } from "@/hooks/use-repository-home";
+import { SessionDiscoveryResults } from "@/components/session-discovery-results";
 
 expect.extend(matchers);
 
@@ -239,6 +249,74 @@ describe("SessionsPage", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+  });
+
+  it.each(["nonarchived", "archived"])(
+    "accepts repository-home navigation for %s sessions without dropping filters",
+    (lifecycle) => {
+      mockSearchParamsState.value = new URLSearchParams({
+        homeRepo: "acme/web-app",
+        repoOwner: "acme",
+        repoName: "web-app",
+        lifecycle,
+        q: "landing",
+      });
+      render(
+        <RepositoryHomeProvider>
+          <SessionsPage />
+        </RepositoryHomeProvider>
+      );
+      expect(lastOptions()).toEqual({ enabled: true });
+      expect(lastQuery()).toMatchObject({
+        repository: { repoOwner: "acme", repoName: "web-app" },
+        lifecycle,
+        q: "landing",
+      });
+      expect(screen.queryByText(/unsupported filters/)).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "New session" })).toHaveAttribute(
+        "href",
+        "/?homeRepo=acme%2Fweb-app"
+      );
+      typeSearch("homepage");
+      act(() => vi.advanceTimersByTime(300));
+      const nextUrl = new URL(mockReplace.mock.calls.at(-1)?.[0], "https://app.test");
+      expect(nextUrl.searchParams.get("homeRepo")).toBe("acme/web-app");
+      expect(nextUrl.searchParams.get("repoName")).toBe("web-app");
+    }
+  );
+
+  it("keeps the repository-home scope in primary and secondary repository result links", () => {
+    mockSearchParamsState.value = new URLSearchParams({ homeRepo: "group/subgroup/site" });
+    render(
+      <RepositoryHomeProvider>
+        <SessionDiscoveryResults
+          sessions={[
+            session("primary", { repoOwner: "group/subgroup", repoName: "site" }),
+            session("secondary", {
+              repositories: [
+                { repoOwner: "acme", repoName: "web-app", repoId: 1, baseBranch: "main" },
+                { repoOwner: "group/subgroup", repoName: "site", repoId: 2, baseBranch: "main" },
+              ],
+            }),
+          ]}
+          environmentNamesById={new Map()}
+          currentUserId={null}
+        />
+      </RepositoryHomeProvider>
+    );
+    const links = within(screen.getByRole("list", { name: "Sessions" })).getAllByRole("link");
+    for (const link of links) {
+      const url = new URL(link.getAttribute("href")!, "https://app.test");
+      expect(url.searchParams.get("homeRepo")).toBe("group/subgroup/site");
+      // Follow the result URL into the same home context used by the session shell.
+      mockSearchParamsState.value = url.searchParams;
+      const scope = renderHook(useRepositoryHome, { wrapper: RepositoryHomeProvider });
+      expect(scope.result.current.scopedHref("/")).toBe("/?homeRepo=group%2Fsubgroup%2Fsite");
+      scope.unmount();
+    }
+    expect(
+      new URL(links[1].getAttribute("href")!, "https://app.test").searchParams.get("repoOwner")
+    ).toBe("acme");
   });
 
   it("renders the header, search, filters, and result rows that open the session", () => {
