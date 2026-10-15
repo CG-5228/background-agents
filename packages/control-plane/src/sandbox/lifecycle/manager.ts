@@ -152,7 +152,7 @@ export interface SandboxShutdownLifecycle extends VmStartupReconciliationShutdow
   /** Converts a failed or interrupted saved-state startup into a durable safety hold. */
   holdFailedRecovery(error: string, generation?: SandboxGeneration): void;
   /** Records runtime protocol support; does not itself grant lifecycle command readiness. */
-  runtimeReady(version?: 1): void;
+  runtimeReady(version?: 1, conversationId?: string | null): void;
   /** Accepts only acknowledgement of the current generation before allowing managed work. */
   generationReady(event: Extract<SandboxEvent, { type: "sandbox_generation_ready" }>): void;
   /** Durably records correlated execution-stop evidence before terminal capture may begin. */
@@ -1907,8 +1907,13 @@ export class SandboxLifecycleManager
    * and activity follow the guarded commit; the event handler wakes the queue
    * and arms inactivity afterward, preserving their existing ordering.
    */
-  onRuntimeReady(timestamp: number, harness?: string, protocolVersion?: 1): boolean {
-    this.shutdown.runtimeReady(protocolVersion);
+  onRuntimeReady(
+    timestamp: number,
+    harness?: string,
+    protocolVersion?: 1,
+    conversationId?: string | null
+  ): boolean {
+    this.shutdown.runtimeReady(protocolVersion, conversationId);
     if (this.shutdown.isHolding()) return false;
     const row = this.storage.getSandbox();
     if (!row) return false;

@@ -57,6 +57,21 @@ export class EventRepository {
     private readonly transactionSync: TransactionSync
   ) {}
 
+  /** Heartbeats alone cannot qualify a stalled turn for unattended continuation. */
+  hasRecentExecutionProgress(messageId: string, sinceMs: number, untilMs: number): boolean {
+    return (
+      this.sql
+        .exec(
+          `SELECT 1 FROM events WHERE message_id = ? AND created_at BETWEEN ? AND ?
+       AND type IN ('token', 'tool_call') LIMIT 1`,
+          messageId,
+          sinceMs,
+          untilMs
+        )
+        .toArray().length > 0
+    );
+  }
+
   createEvent(data: CreateEventData): void {
     this.sql.exec(
       `INSERT INTO events (id, type, data, message_id, created_at, timeline_sequence)

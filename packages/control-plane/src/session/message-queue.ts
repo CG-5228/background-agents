@@ -175,7 +175,8 @@ export class SessionMessageQueue {
     /** Resolved per use so it honors settings persisted after construction. */
     private readonly getExecutionTimeoutMs: () => number,
     private readonly mayDispatch: () => boolean,
-    private readonly getSandboxPromptBlockReason: () => string | null
+    private readonly getSandboxPromptBlockReason: () => string | null,
+    private readonly getPriorityMessageId: () => string | null = () => null
   ) {}
 
   async enqueueAutofix(
@@ -426,7 +427,12 @@ export class SessionMessageQueue {
       return;
     }
 
-    const message = this.messageRepository.getNextPendingMessage();
+    const priorityMessageId = this.getPriorityMessageId();
+    const priority = priorityMessageId
+      ? this.messageRepository.getMessageById(priorityMessageId)
+      : null;
+    const message =
+      priority?.status === "pending" ? priority : this.messageRepository.getNextPendingMessage();
     if (!message) {
       return;
     }
@@ -1006,9 +1012,15 @@ export class SessionMessageQueue {
   }
 
   broadcastPromptQueue(): void {
+    const priorityMessageId = this.getPriorityMessageId();
     this.messenger.broadcast({
       type: "prompt_queue_updated",
-      promptQueue: this.messageRepository.listPromptQueue(),
+      promptQueue: this.messageRepository
+        .listPromptQueue()
+        .sort(
+          (a, b) =>
+            Number(b.messageId === priorityMessageId) - Number(a.messageId === priorityMessageId)
+        ),
     });
   }
 }

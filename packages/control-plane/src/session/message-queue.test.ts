@@ -138,7 +138,8 @@ it("creates a canonical SHA-256 web prompt fingerprint", async () => {
 
 function buildQueue(
   mayDispatch: () => boolean = () => true,
-  getSandboxPromptBlockReason: () => string | null = () => null
+  getSandboxPromptBlockReason: () => string | null = () => null,
+  getPriorityMessageId: () => string | null = () => null
 ) {
   // Mutable so tests can pin that the deadline honors the value current at
   // dispatch time — the thunk exists because settings can be persisted after
@@ -306,7 +307,8 @@ function buildQueue(
     executionStop,
     () => executionTimeoutMs,
     mayDispatch,
-    getSandboxPromptBlockReason
+    getSandboxPromptBlockReason,
+    getPriorityMessageId
   );
 
   return {
@@ -2589,5 +2591,54 @@ describe("SessionMessageQueue", () => {
       expect(h.repository.updateParticipantCoalesce).not.toHaveBeenCalled();
       expect(h.repository.updateParticipantIdentity).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("expiry continuation queue ordering", () => {
+  it("dispatches the restored task before later queued prompts", async () => {
+    const h = buildQueue(
+      () => true,
+      () => null,
+      () => "continuation"
+    );
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "queued-user" }));
+    h.repository.getMessageById.mockReturnValue(
+      createMessage({ id: "continuation", content: "Continue saved work" })
+    );
+    await h.queue.processMessageQueue();
+    expect(h.repository.startMessageProcessing).toHaveBeenCalledWith(
+      "continuation",
+      expect.any(Number),
+      expect.anything()
+    );
+  });
+
+  it("leaves queued work held until restored context is admitted", async () => {
+    const h = buildQueue(
+      () => false,
+      () => null,
+      () => "continuation"
+    );
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "queued-user" }));
+    await h.queue.processMessageQueue();
+    expect(h.repository.startMessageProcessing).not.toHaveBeenCalled();
+  });
+
+  it("dispatches normal queued work after the continuation has finished", async () => {
+    const h = buildQueue(
+      () => true,
+      () => null,
+      () => null
+    );
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "queued-user" }));
+    await h.queue.processMessageQueue();
+    expect(h.repository.startMessageProcessing).toHaveBeenCalledWith(
+      "queued-user",
+      expect.any(Number),
+      expect.anything()
+    );
   });
 });

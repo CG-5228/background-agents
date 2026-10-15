@@ -6,6 +6,7 @@ import {
 import { SandboxAccess } from "../../src/sandbox/lifecycle/sandbox-access";
 import { providerResumesAfterStop, type SandboxProvider } from "../../src/sandbox/provider";
 import { LifecycleSessionContext } from "../../src/session/sandbox-lifecycle-adapters";
+import { ExpiryContinuation } from "../../src/session/expiry-continuation";
 import { SandboxShutdownCoordinator } from "../../src/session/sandbox-shutdown";
 import {
   SandboxShutdownRepository,
@@ -95,6 +96,12 @@ export function realLifecycleHarness(
     session: sessions,
     messages,
     failures,
+    continuation: new ExpiryContinuation(
+      sessions,
+      messages,
+      new EventRepository(durableState.storage.sql, transaction),
+      () => 7_200_000
+    ),
     messenger: {
       broadcast: (message: object) => {
         options.onAnnouncement?.(message);

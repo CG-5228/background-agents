@@ -111,6 +111,7 @@ import { SessionMessageQueue } from "./message-queue";
 import { SessionBudgetService } from "./budget-service";
 import { ExecutionStopCoordinator } from "./execution-stop-coordinator";
 import { MessageFailureService } from "./message-failure-service";
+import { ExpiryContinuation } from "./expiry-continuation";
 import { SandboxShutdownCoordinator } from "./sandbox-shutdown";
 import { SandboxShutdownRepository } from "./sandbox-shutdown-repository";
 import { SandboxArtifactEventHandler } from "./sandbox-events/artifact.handler";
@@ -487,6 +488,12 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     session: sessionCoreRepository,
     messages: messageRepository,
     failures: messageFailures,
+    continuation: new ExpiryContinuation(
+      sessionCoreRepository,
+      messageRepository,
+      eventRepository,
+      getExecutionTimeoutMs
+    ),
     messenger,
     events: eventRepository,
     sockets: wsManager,
@@ -563,7 +570,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     executionStop,
     getExecutionTimeoutMs,
     () => lifecycleManager.mayProcessQueuedWork(),
-    () => sandboxPromptBlockReason(lifecycleManager.shutdownSnapshot())
+    () => sandboxPromptBlockReason(lifecycleManager.shutdownSnapshot()),
+    () => shutdown.pendingContinuationMessageId()
   );
 
   // Tier 7 — services over the queue and lifecycle.
