@@ -10,6 +10,8 @@ export interface SessionListFilters {
   status?: SessionStatus;
   excludeStatus?: SessionStatus;
   excludeAutomationLineage?: boolean;
+  /** Leave out `created` sessions: composer drafts that have not been prompted. */
+  excludeDrafts?: boolean;
   createdByUserIds?: readonly string[];
   /**
    * Discovery search text, already trimmed and bounded by the shared query
@@ -59,6 +61,7 @@ export function buildSessionListPredicates(filters: SessionListFilters): Session
     status,
     excludeStatus,
     excludeAutomationLineage,
+    excludeDrafts,
     createdByUserIds,
     search,
     repository,
@@ -83,6 +86,8 @@ export function buildSessionListPredicates(filters: SessionListFilters): Session
     conditions.push("status != ?");
     params.push(excludeStatus);
   }
+
+  if (excludeDrafts) conditions.push("status != 'created'");
 
   if (excludeAutomationLineage) {
     // The "Mine" view excludes sessions no human initiated in the app.

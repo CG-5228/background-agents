@@ -29,6 +29,7 @@ import { SessionInternalPaths, type SessionInternalPath } from "../session/contr
 import type { Env } from "../types";
 import {
   error,
+  json,
   GITHUB_SANDBOX_FALLBACK_ROUTE,
   GITHUB_USER_OR_SERVICE_ROUTE,
   NO_AUTHORIZATION,
@@ -43,6 +44,10 @@ import {
 import { parseBody, parseJsonBody } from "./body";
 import { type SessionRouteContext, dispatchSession } from "./session-route";
 import { canManageSessionBudget } from "../session/budget-authorization";
+import { SessionDraftExpiryClient } from "../session/abandoned-draft-sweep";
+import { createLogger } from "../logger";
+
+const logger = createLogger("router:session-runtime-proxy");
 
 const participantsResponseSchema = z.object({
   participants: z.array(
@@ -309,6 +314,36 @@ function lifecycleProxy(internalPath: SessionInternalPath): ProxyHandler {
 }
 
 /**
+ * Discard a warm draft its composer no longer needs.
+ *
+ * Unlike archive, this never touches a session that has received a prompt: the
+ * runtime's own `expire-draft` check decides, and anything that is not an empty
+ * draft comes back unchanged as `not_draft` or `has_work`. That is what lets the
+ * composer call it whenever a draft is abandoned without racing a send. A
+ * discarded draft's index row is deleted, so it never appears in a list.
+ */
+async function handleDiscardDraft(
+  _request: Request,
+  _env: Env,
+  params: SessionParams,
+  ctx: SessionRouteContext
+): Promise<Response> {
+  const outcome = await new SessionDraftExpiryClient(ctx.sessionRuntime).expireDraft(params.id);
+  if (outcome === "missing") return error("Session not found", 404);
+  if (outcome !== "archived") return json({ outcome });
+
+  await new SessionIndexStore(ctx.db).deleteExpiredDraft(params.id);
+  logger.info("session.draft_discarded", {
+    event: "session.draft_discarded",
+    session_id: params.id,
+    actor_user_id: ctx.authorization?.userId ?? null,
+    request_id: ctx.request_id,
+    trace_id: ctx.trace_id,
+  });
+  return json({ outcome: "discarded" });
+}
+
+/**
  * Live limit changes are the session owner's alone: the runtime enforces the
  * limit for every participant, so raising or removing it is not collaboration.
  */
@@ -466,6 +501,9 @@ sessionRuntimeProxyRoutes.patch("/sessions/:id/title", LIFECYCLE, (c) =>
 );
 sessionRuntimeProxyRoutes.post("/sessions/:id/archive", LIFECYCLE, (c) =>
   dispatchSession(c, lifecycleProxy(SessionInternalPaths.archive))
+);
+sessionRuntimeProxyRoutes.post("/sessions/:id/discard-draft", LIFECYCLE, (c) =>
+  dispatchSession(c, handleDiscardDraft)
 );
 sessionRuntimeProxyRoutes.post("/sessions/:id/unarchive", LIFECYCLE, (c) =>
   dispatchSession(c, lifecycleProxy(SessionInternalPaths.unarchive))

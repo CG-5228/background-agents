@@ -4,7 +4,7 @@ import { useLayoutEffect } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
-import { retireWarmDraftSession } from "@/lib/warm-session";
+import { discardWarmDraftSession } from "@/lib/warm-session";
 import type { InteractiveProviderRoutingIdentity } from "@/lib/provider-selection";
 import {
   useWarmDraftSession,
@@ -13,11 +13,14 @@ import {
 } from "./use-warm-draft-session";
 
 vi.mock("@/lib/browser-api-fetch", () => ({ browserApiFetch: vi.fn() }));
-vi.mock("@/lib/warm-session", () => ({ retireWarmDraftSession: vi.fn() }));
+vi.mock("@/lib/warm-session", () => ({ discardWarmDraftSession: vi.fn() }));
 
-const request = (model = "openai/gpt-5.4"): WarmDraftSessionRequest => ({
+const request = (
+  model = "openai/gpt-5.4",
+  repoName = "background-agents"
+): WarmDraftSessionRequest => ({
   repoOwner: "open-inspect",
-  repoName: "background-agents",
+  repoName,
   harness: "opencode",
   model,
   skillSelection: { mode: "all" },
@@ -28,6 +31,8 @@ const request = (model = "openai/gpt-5.4"): WarmDraftSessionRequest => ({
   teamId: null,
   visibility: "workspace",
 });
+
+const otherRepository = () => request(undefined, "another-repository");
 
 const routing = (
   xai: InteractiveProviderRoutingIdentity["xai"] = { mode: "legacy_scoped_oauth" }
@@ -44,7 +49,7 @@ describe("useWarmDraftSession", () => {
     { includePersonalMemories: false },
     { teamId: "team-2", visibility: "team" as const },
     { teamId: "team-1", visibility: "private" as const },
-  ])("retires and recreates a draft when team or visibility changes: %j", async (next) => {
+  ])("discards and recreates a draft when team or visibility changes: %j", async (next) => {
     vi.mocked(browserApiFetch)
       .mockResolvedValueOnce(Response.json({ sessionId: "old-session", status: "created" }))
       .mockResolvedValueOnce(Response.json({ sessionId: "new-session", status: "created" }));
@@ -62,7 +67,7 @@ describe("useWarmDraftSession", () => {
       await result.current.warm();
     });
     rerender({ launchRequest: { ...initial, ...next } });
-    expect(retireWarmDraftSession).toHaveBeenCalledWith("old-session");
+    expect(discardWarmDraftSession).toHaveBeenCalledWith("old-session");
     await act(async () => {
       await result.current.warm();
     });
@@ -98,7 +103,7 @@ describe("useWarmDraftSession", () => {
       });
       expect(browserApiFetch).toHaveBeenCalledTimes(1);
 
-      rerender({ launchRequest: request("openai/gpt-5.5") });
+      rerender({ launchRequest: request("anthropic/claude-sonnet-4-6") });
       expect(result.current.error).toBeNull();
       await act(async () => {
         await result.current.warm();
@@ -196,7 +201,7 @@ describe("useWarmDraftSession", () => {
       await expect(result.current.warm()).resolves.toBe("retried-session");
     });
     expect(browserApiFetch).toHaveBeenCalledTimes(2);
-    expect(retireWarmDraftSession).not.toHaveBeenCalled();
+    expect(discardWarmDraftSession).not.toHaveBeenCalled();
   });
 
   it("does not retry a still-missing grant on timers or same-identity renders", async () => {
@@ -254,7 +259,7 @@ describe("useWarmDraftSession", () => {
     act(() => {
       warming = result.current.warm();
     });
-    rerender({ launchRequest: request("openai/gpt-5.5") });
+    rerender({ launchRequest: otherRepository() });
     resolveCreate?.(
       Response.json({ error: "Forbidden", code: "not_team_member" }, { status: 403 })
     );
@@ -285,7 +290,7 @@ describe("useWarmDraftSession", () => {
     );
   });
 
-  it("retires a completed draft when any launch input changes", async () => {
+  it("discards a completed draft when any launch input changes", async () => {
     vi.mocked(browserApiFetch).mockResolvedValue(
       Response.json({ sessionId: "session-1", status: "created" })
     );
@@ -299,9 +304,33 @@ describe("useWarmDraftSession", () => {
     });
     expect(result.current.sessionId).toBe("session-1");
 
-    rerender({ launchRequest: request("openai/gpt-5.5") });
-    await waitFor(() => expect(retireWarmDraftSession).toHaveBeenCalledWith("session-1"));
+    rerender({ launchRequest: otherRepository() });
+    await waitFor(() => expect(discardWarmDraftSession).toHaveBeenCalledWith("session-1"));
     expect(result.current.sessionId).toBeNull();
+  });
+
+  it.each([
+    { change: "model within the provider", next: request("openai/gpt-5.5") },
+    { change: "reasoning effort", next: { ...request(), reasoningEffort: "high" } },
+  ])("keeps the draft when only the $change changes", async ({ next }) => {
+    vi.mocked(browserApiFetch).mockResolvedValue(
+      Response.json({ sessionId: "session-1", status: "created" })
+    );
+    const { result, rerender } = renderHook(
+      ({ launchRequest }) => useWarmDraftSession(launchRequest),
+      { initialProps: { launchRequest: request() } }
+    );
+    await act(async () => {
+      await result.current.warm();
+    });
+
+    rerender({ launchRequest: next });
+    await act(async () => {
+      await expect(result.current.warm()).resolves.toBe("session-1");
+    });
+
+    expect(discardWarmDraftSession).not.toHaveBeenCalled();
+    expect(browserApiFetch).toHaveBeenCalledTimes(1);
   });
 
   it("rejects a malformed create-session response", async () => {
@@ -315,7 +344,7 @@ describe("useWarmDraftSession", () => {
     expect(result.current.sessionId).toBeNull();
   });
 
-  it("retires a draft and warms the explicit provider account after authentication changes", async () => {
+  it("discards a draft and warms the explicit provider account after authentication changes", async () => {
     vi.mocked(browserApiFetch)
       .mockResolvedValueOnce(Response.json({ sessionId: "legacy-session", status: "created" }))
       .mockResolvedValueOnce(Response.json({ sessionId: "account-session", status: "created" }));
@@ -335,7 +364,7 @@ describe("useWarmDraftSession", () => {
       await result.current.warm();
     });
     rerender({ launchRequest: explicit });
-    await waitFor(() => expect(retireWarmDraftSession).toHaveBeenCalledWith("legacy-session"));
+    await waitFor(() => expect(discardWarmDraftSession).toHaveBeenCalledWith("legacy-session"));
     await act(async () => {
       await result.current.warm();
     });
@@ -347,7 +376,7 @@ describe("useWarmDraftSession", () => {
     expect(result.current.sessionId).toBe("account-session");
   });
 
-  it("retires a draft when its effective provider account changes", async () => {
+  it("discards a draft when its effective provider account changes", async () => {
     vi.mocked(browserApiFetch).mockResolvedValue(
       Response.json({ sessionId: "default-session", status: "created" })
     );
@@ -376,11 +405,11 @@ describe("useWarmDraftSession", () => {
       }),
     });
 
-    await waitFor(() => expect(retireWarmDraftSession).toHaveBeenCalledWith("default-session"));
+    await waitFor(() => expect(discardWarmDraftSession).toHaveBeenCalledWith("default-session"));
     expect(result.current.sessionId).toBeNull();
   });
 
-  it("retires a draft when the implicit default account becomes unavailable", async () => {
+  it("discards a draft when the implicit default account becomes unavailable", async () => {
     vi.mocked(browserApiFetch).mockResolvedValue(
       Response.json({ sessionId: "active-default-session", status: "created" })
     );
@@ -410,12 +439,12 @@ describe("useWarmDraftSession", () => {
     });
 
     await waitFor(() =>
-      expect(retireWarmDraftSession).toHaveBeenCalledWith("active-default-session")
+      expect(discardWarmDraftSession).toHaveBeenCalledWith("active-default-session")
     );
     expect(result.current.sessionId).toBeNull();
   });
 
-  it("retires a draft when an explicitly selected account becomes unavailable", async () => {
+  it("discards a draft when an explicitly selected account becomes unavailable", async () => {
     vi.mocked(browserApiFetch).mockResolvedValue(
       Response.json({ sessionId: "explicit-account-session", status: "created" })
     );
@@ -449,7 +478,7 @@ describe("useWarmDraftSession", () => {
     });
 
     await waitFor(() =>
-      expect(retireWarmDraftSession).toHaveBeenCalledWith("explicit-account-session")
+      expect(discardWarmDraftSession).toHaveBeenCalledWith("explicit-account-session")
     );
     expect(result.current.sessionId).toBeNull();
   });
@@ -471,19 +500,19 @@ describe("useWarmDraftSession", () => {
       { initialProps: { launchRequest: request(), warmInLayout: false } }
     );
 
-    rerender({ launchRequest: request("openai/gpt-5.5"), warmInLayout: true });
+    rerender({ launchRequest: otherRepository(), warmInLayout: true });
     await act(async () => {
       await warming;
     });
 
     expect(browserApiFetch).toHaveBeenCalledWith(
       "/api/sessions",
-      expect.objectContaining({ body: JSON.stringify(request("openai/gpt-5.5")) })
+      expect.objectContaining({ body: JSON.stringify(otherRepository()) })
     );
     await expect(warming).resolves.toBe("session-2");
   });
 
-  it("retires a stale response even when the aborted request still settles", async () => {
+  it("discards a stale response even when the aborted request still settles", async () => {
     let resolveCreate: ((response: Response) => void) | undefined;
     vi.mocked(browserApiFetch).mockImplementation(
       () => new Promise<Response>((resolve) => (resolveCreate = resolve))
@@ -497,17 +526,17 @@ describe("useWarmDraftSession", () => {
     act(() => {
       warming = result.current.warm();
     });
-    rerender({ launchRequest: request("openai/gpt-5.5") });
+    rerender({ launchRequest: otherRepository() });
     resolveCreate?.(Response.json({ sessionId: "stale-session", status: "created" }));
 
     await act(async () => {
       await warming;
     });
-    expect(retireWarmDraftSession).toHaveBeenCalledWith("stale-session");
+    expect(discardWarmDraftSession).toHaveBeenCalledWith("stale-session");
     expect(result.current.sessionId).toBeNull();
   });
 
-  it("retires a response that settles after unmount", async () => {
+  it("discards a response that settles after unmount", async () => {
     let resolveCreate: ((response: Response) => void) | undefined;
     vi.mocked(browserApiFetch).mockImplementation(
       () => new Promise<Response>((resolve) => (resolveCreate = resolve))
@@ -524,7 +553,7 @@ describe("useWarmDraftSession", () => {
     await act(async () => {
       await warming;
     });
-    expect(retireWarmDraftSession).toHaveBeenCalledWith("orphaned-session");
+    expect(discardWarmDraftSession).toHaveBeenCalledWith("orphaned-session");
   });
 
   it.each([
@@ -536,7 +565,118 @@ describe("useWarmDraftSession", () => {
     const { result } = renderHook(() => useWarmDraftSession(request()));
 
     await expect(result.current.warm()).resolves.toBeNull();
-    expect(retireWarmDraftSession).not.toHaveBeenCalled();
+    expect(discardWarmDraftSession).not.toHaveBeenCalled();
     expect(result.current.sessionId).toBeNull();
+  });
+});
+
+describe("useWarmDraftSession claims", () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it("never aborts creation, since the server finishes it regardless", async () => {
+    vi.mocked(browserApiFetch).mockResolvedValue(
+      Response.json({ sessionId: "session-1", status: "created" })
+    );
+    const { result } = renderHook(() => useWarmDraftSession(request()));
+    await act(async () => {
+      await result.current.warm();
+    });
+    expect(vi.mocked(browserApiFetch).mock.calls[0][1]).not.toHaveProperty("signal");
+  });
+
+  it("keeps a claimed draft through unmount", async () => {
+    vi.mocked(browserApiFetch).mockResolvedValue(
+      Response.json({ sessionId: "session-1", status: "created" })
+    );
+    const { result, unmount } = renderHook(() => useWarmDraftSession(request()));
+    await act(async () => {
+      await result.current.warm();
+    });
+
+    let claimed: string | null = null;
+    await act(async () => {
+      claimed = await result.current.claim();
+    });
+    unmount();
+
+    expect(claimed).toBe("session-1");
+    expect(result.current.sessionId).toBeNull();
+    expect(discardWarmDraftSession).not.toHaveBeenCalled();
+  });
+
+  it("claims an in-flight creation, so neither unmount nor a request change discards it", async () => {
+    let resolveCreate: ((response: Response) => void) | undefined;
+    vi.mocked(browserApiFetch).mockImplementation(
+      () => new Promise<Response>((resolve) => (resolveCreate = resolve))
+    );
+    const { result, rerender, unmount } = renderHook(
+      ({ launchRequest }) => useWarmDraftSession(launchRequest),
+      { initialProps: { launchRequest: request() } }
+    );
+    act(() => {
+      void result.current.warm();
+    });
+
+    let claiming: Promise<string | null> | undefined;
+    act(() => {
+      claiming = result.current.claim();
+    });
+    rerender({ launchRequest: otherRepository() });
+    unmount();
+    resolveCreate?.(Response.json({ sessionId: "claimed-session", status: "created" }));
+
+    await expect(claiming).resolves.toBe("claimed-session");
+    expect(discardWarmDraftSession).not.toHaveBeenCalled();
+    expect(browserApiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts a creation for a claim when none is warming", async () => {
+    vi.mocked(browserApiFetch).mockResolvedValue(
+      Response.json({ sessionId: "session-1", status: "created" })
+    );
+    const { result } = renderHook(() => useWarmDraftSession(request()));
+    await act(async () => {
+      await expect(result.current.claim()).resolves.toBe("session-1");
+    });
+    expect(result.current.sessionId).toBeNull();
+  });
+
+  it("takes a released draft back while the composer still wants that launch", async () => {
+    vi.mocked(browserApiFetch).mockResolvedValue(
+      Response.json({ sessionId: "session-1", status: "created" })
+    );
+    const { result } = renderHook(() => useWarmDraftSession(request()));
+    await act(async () => {
+      await result.current.claim();
+    });
+
+    act(() => result.current.release("session-1", result.current.identity));
+
+    expect(result.current.sessionId).toBe("session-1");
+    expect(discardWarmDraftSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { reason: "the launch changed", unmountFirst: false },
+    { reason: "the composer unmounted", unmountFirst: true },
+  ])("discards a released draft once $reason", async ({ unmountFirst }) => {
+    vi.mocked(browserApiFetch).mockResolvedValue(
+      Response.json({ sessionId: "session-1", status: "created" })
+    );
+    const { result, rerender, unmount } = renderHook(
+      ({ launchRequest }) => useWarmDraftSession(launchRequest),
+      { initialProps: { launchRequest: request() } }
+    );
+    await act(async () => {
+      await result.current.claim();
+    });
+    const launchIdentity = result.current.identity;
+    const { release } = result.current;
+
+    if (unmountFirst) unmount();
+    else rerender({ launchRequest: otherRepository() });
+    act(() => release("session-1", launchIdentity));
+
+    expect(discardWarmDraftSession).toHaveBeenCalledWith("session-1");
   });
 });

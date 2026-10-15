@@ -1,15 +1,18 @@
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 
-export async function retireWarmDraftSession(sessionId: string): Promise<void> {
+/**
+ * Discards a warm draft the composer no longer needs. The control plane only
+ * removes a session that never received a prompt, so this is safe to call for
+ * a draft whose send may have landed.
+ */
+export async function discardWarmDraftSession(sessionId: string): Promise<void> {
   try {
     const response = await browserApiFetch(
-      `/api/sessions/${encodeURIComponent(sessionId)}/archive`,
-      {
-        method: "POST",
-      }
+      `/api/sessions/${encodeURIComponent(sessionId)}/discard-draft`,
+      { method: "POST" }
     );
-    if (!response.ok) throw new Error(`Warm session archive failed: ${response.status}`);
+    if (!response.ok) throw new Error(`Warm session discard failed: ${response.status}`);
   } catch (error) {
-    console.error("Failed to retire superseded warm session:", error);
+    console.error("Failed to discard warm draft session:", error);
   }
 }

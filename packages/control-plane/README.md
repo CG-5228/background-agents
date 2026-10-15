@@ -84,6 +84,7 @@ not pass through Hono.
 | `/sessions/:id/ws-token`        | POST      | Generate WebSocket token             |
 | `/sessions/:id/archive`         | POST      | Archive session                      |
 | `/sessions/:id/unarchive`       | POST      | Unarchive session                    |
+| `/sessions/:id/discard-draft`   | POST      | Delete a never-prompted draft        |
 | `/sessions/batch-archive`       | POST      | Archive explicitly selected sessions |
 
 ### Create PR Payload

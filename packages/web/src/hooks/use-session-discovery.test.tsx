@@ -71,15 +71,15 @@ afterEach(() => {
 describe("useSessionDiscovery", () => {
   it("pages with offsets that embed the full query and resets when a filter changes", async () => {
     const fetchMock = stubPages({
-      "/api/sessions?limit=50&offset=0&excludeStatus=archived&q=login": {
+      "/api/sessions?limit=50&offset=0&excludeStatus=archived&excludeDrafts=true&q=login": {
         sessions: [session("first")],
         hasMore: true,
       },
-      "/api/sessions?limit=50&offset=50&excludeStatus=archived&q=login": {
+      "/api/sessions?limit=50&offset=50&excludeStatus=archived&excludeDrafts=true&q=login": {
         sessions: [session("second")],
         hasMore: false,
       },
-      "/api/sessions?limit=50&offset=0&status=archived&q=login": {
+      "/api/sessions?limit=50&offset=0&status=archived&excludeDrafts=true&q=login": {
         sessions: [session("archived-one")],
         hasMore: false,
       },
@@ -111,10 +111,10 @@ describe("useSessionDiscovery", () => {
     // Load more also revalidates the first page (SWR's default), so a row
     // bumped since the first fetch is not shown stale next to the new page.
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
-      "/api/sessions?limit=50&offset=0&excludeStatus=archived&q=login",
-      "/api/sessions?limit=50&offset=0&excludeStatus=archived&q=login",
-      "/api/sessions?limit=50&offset=50&excludeStatus=archived&q=login",
-      "/api/sessions?limit=50&offset=0&status=archived&q=login",
+      "/api/sessions?limit=50&offset=0&excludeStatus=archived&excludeDrafts=true&q=login",
+      "/api/sessions?limit=50&offset=0&excludeStatus=archived&excludeDrafts=true&q=login",
+      "/api/sessions?limit=50&offset=50&excludeStatus=archived&excludeDrafts=true&q=login",
+      "/api/sessions?limit=50&offset=0&status=archived&excludeDrafts=true&q=login",
     ]);
   });
 
@@ -135,11 +135,11 @@ describe("useSessionDiscovery", () => {
 
   it("drops a row the server handed to two offset pages", async () => {
     stubPages({
-      "/api/sessions?limit=50&offset=0&excludeStatus=archived": {
+      "/api/sessions?limit=50&offset=0&excludeStatus=archived&excludeDrafts=true": {
         sessions: [session("a"), session("b")],
         hasMore: true,
       },
-      "/api/sessions?limit=50&offset=50&excludeStatus=archived": {
+      "/api/sessions?limit=50&offset=50&excludeStatus=archived&excludeDrafts=true": {
         sessions: [session("b"), session("c")],
         hasMore: false,
       },

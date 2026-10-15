@@ -129,7 +129,7 @@ describe("Home", () => {
     expect(input).toHaveValue("$review-pr ");
   });
 
-  it("keeps the attachment control anchored while the sandbox warms", async () => {
+  it("creates the draft quietly, without claiming to warm a sandbox", async () => {
     let resolveCreate: ((response: Response) => void) | undefined;
     vi.mocked(fetch).mockImplementation(
       (input) =>
@@ -145,15 +145,13 @@ describe("Home", () => {
     render(<Home />);
 
     await user.type(screen.getByPlaceholderText("What do you want to build?"), "I");
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/sessions", expect.anything()));
 
-    const warmingStatus = await screen.findByText("Warming sandbox...");
-    const attachmentButton = screen.getByRole("button", { name: "Attach images" });
-    expect(
-      warmingStatus.compareDocumentPosition(attachmentButton) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
+    // The request only creates the session record; the sandbox boots server-side.
+    expect(screen.queryByText("Warming sandbox...")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Attach images" })).toBeEnabled();
 
     resolveCreate?.(Response.json({ sessionId: "session-1", status: "created" }));
-    await waitFor(() => expect(screen.queryByText("Warming sandbox...")).not.toBeInTheDocument());
   });
 
   it("does not warm a pending session from a malformed create response", async () => {

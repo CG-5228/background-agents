@@ -165,7 +165,7 @@ export class SessionMessageQueue {
     private readonly getProviderAuthenticationError: (model: string) => Promise<string | null>,
     private readonly messageFailures: MessageFailureService,
     private readonly sandboxLifecycle: SandboxLifecycle,
-    private readonly sessionIndex: Pick<SessionIndexStore, "touchUpdatedAt">,
+    private readonly sessionIndex: Pick<SessionIndexStore, "touchUpdatedAt" | "updateModel">,
     private readonly scmProvider: SourceControlProviderName,
     private readonly alarmScheduler: AlarmScheduler,
     private readonly executionStop: ExecutionStopCoordinator,
@@ -867,6 +867,7 @@ export class SessionMessageQueue {
       throw error;
     }
 
+    if (messageModel) this.adoptFirstPromptModel(messageModel, messageReasoningEffort ?? null);
     await this.sessionStatus.transition("active");
     this.broadcastPromptQueue();
 
@@ -890,6 +891,24 @@ export class SessionMessageQueue {
     });
 
     return { messageId, position, deduplicated: false };
+  }
+
+  /**
+   * A draft's first prompt decides its model. The web composer creates the
+   * draft before the author has settled on a model, and follow-ups without an
+   * override (bots, and the session page's default selection) inherit the
+   * session's, so it takes the model the work actually started with.
+   */
+  private adoptFirstPromptModel(model: string, reasoningEffort: string | null): void {
+    const session = this.repository.getSession();
+    if (session?.status !== "created") return;
+    if (session.model === model && (session.reasoning_effort ?? null) === reasoningEffort) return;
+    this.repository.updateSessionModel(session.id, model, reasoningEffort);
+    const sessionId = session.session_name || session.id;
+    this.backgroundTasks.submit(
+      () => this.sessionIndex.updateModel(sessionId, model, reasoningEffort),
+      { name: "session_index.update_model", context: { session_id: sessionId } }
+    );
   }
 
   /** Refresh the session index's activity timestamp in the background. */

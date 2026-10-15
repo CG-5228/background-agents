@@ -64,22 +64,28 @@ describe("session list query codec", () => {
         status: "active",
         excludeStatus: "archived",
         excludeAutomationLineage: true,
+        excludeDrafts: true,
         createdBy: [SESSION_LIST_CURRENT_USER, "a".repeat(32)],
       }).toString()
     ).toBe(
-      "limit=25&offset=50&status=active&excludeStatus=archived&excludeAutomationLineage=true&createdBy=me&createdBy=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "limit=25&offset=50&status=active&excludeStatus=archived&excludeAutomationLineage=true&excludeDrafts=true&createdBy=me&createdBy=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     );
   });
 
   it("omits optional false and undefined filters", () => {
-    expect(serializeSessionListQuery({ excludeAutomationLineage: false }).toString()).toBe("");
+    expect(
+      serializeSessionListQuery({
+        excludeAutomationLineage: false,
+        excludeDrafts: false,
+      }).toString()
+    ).toBe("");
   });
 
   it("parses filters, repeated creators, and pagination", () => {
     expect(
       parseSessionListQuery(
         new URLSearchParams(
-          "limit=25&offset=50&status=active&excludeStatus=archived&excludeAutomationLineage=false&createdBy=me&createdBy=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "limit=25&offset=50&status=active&excludeStatus=archived&excludeAutomationLineage=false&excludeDrafts=true&createdBy=me&createdBy=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         )
       )
     ).toEqual({
@@ -90,6 +96,7 @@ describe("session list query codec", () => {
         status: "active",
         excludeStatus: "archived",
         excludeAutomationLineage: false,
+        excludeDrafts: true,
         createdBy: ["me", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
       },
     });
@@ -130,6 +137,8 @@ describe("session list query codec", () => {
     ["excludeStatus=unknown", "excludeStatus"],
     ["excludeAutomationLineage=", "excludeAutomationLineage"],
     ["excludeAutomationLineage=1", "excludeAutomationLineage"],
+    ["excludeDrafts=", "excludeDrafts"],
+    ["excludeDrafts=yes", "excludeDrafts"],
     ["createdBy=not-a-user-id", "createdBy"],
   ] as const)("rejects invalid transport input %s", (query, invalidParam) => {
     expect(parseSessionListQuery(new URLSearchParams(query))).toEqual({
@@ -188,6 +197,7 @@ describe("session discovery query codec", () => {
         status: undefined,
         excludeStatus: undefined,
         excludeAutomationLineage: false,
+        excludeDrafts: false,
         createdBy: [],
         q: "Fix Login",
         repoOwner: "acme",
@@ -244,6 +254,7 @@ describe("session discovery query codec", () => {
       offset: 25,
       status: "archived" as const,
       excludeAutomationLineage: false,
+      excludeDrafts: false,
       createdBy: ["a".repeat(32)],
       q: "owner/repo",
       repoOwner: "group/subgroup",

@@ -63,6 +63,7 @@ const draftExpiryResponseSchema = z.object({ outcome: draftExpiryOutcomeSchema }
 export interface AbandonedDraftIndex {
   listAbandonedDraftSessionIds(staleBefore: number, limit: number): Promise<string[]>;
   archiveOrphanedDraft(id: string): Promise<boolean>;
+  deleteExpiredDraft(id: string): Promise<boolean>;
 }
 
 /** Asks one session to retire itself. */
@@ -226,12 +227,17 @@ export class AbandonedDraftSweep {
   }
 
   /**
-   * A missing session is retired here rather than by its Durable Object: there
-   * is no Durable Object to do it, which is exactly what the 404 established.
+   * An expired draft never held a message, so its index row is deleted rather
+   * than left in the Archived list. A missing session is retired here rather
+   * than by its Durable Object: there is no Durable Object to do it, which is
+   * exactly what the 404 established, and with no runtime to confirm the
+   * session was empty the row is archived, not deleted.
    */
   private async expireOne(sessionId: string): Promise<DraftSweepOutcome> {
     const outcome = await this.client.expireDraft(sessionId);
-    if (outcome === "missing") {
+    if (outcome === "archived") {
+      await this.index.deleteExpiredDraft(sessionId);
+    } else if (outcome === "missing") {
       await this.index.archiveOrphanedDraft(sessionId);
     }
     return outcome;

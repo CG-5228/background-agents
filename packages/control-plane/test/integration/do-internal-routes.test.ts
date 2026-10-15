@@ -414,6 +414,18 @@ describe("DO internal sub-session routes", () => {
       expect(rows[0].status).toBe("archived");
     });
 
+    it("stops the draft's warm sandbox instead of leaving it to idle out", async () => {
+      const { stub } = await initSession();
+      // A composer discard arrives seconds after the warm spawn.
+      await queryDO(stub, "UPDATE sandbox SET status = 'ready'");
+
+      const res = await stub.fetch("http://internal/internal/expire-draft", { method: "POST" });
+
+      expect(await res.json()).toEqual({ outcome: "archived", status: "archived" });
+      const sandboxes = await queryDO<{ status: string }>(stub, "SELECT status FROM sandbox");
+      expect(sandboxes.map((row) => row.status)).toEqual(["stopped"]);
+    });
+
     it("spares a session that started work after the sweep selected it", async () => {
       const { stub } = await initSession();
       // The sweep reads candidates from D1, so the session may have been

@@ -163,6 +163,15 @@ export class SessionCoreRepository {
     );
   }
 
+  updateSessionModel(sessionId: string, model: string, reasoningEffort: string | null): void {
+    this.sql.exec(
+      `UPDATE session SET model = ?, reasoning_effort = ? WHERE id = ?`,
+      model,
+      reasoningEffort,
+      sessionId
+    );
+  }
+
   updateSessionTitleIfUnset(sessionId: string, title: string, updatedAt: number): boolean {
     const result = this.sql.exec(
       `UPDATE session SET title = ?, updated_at = ?

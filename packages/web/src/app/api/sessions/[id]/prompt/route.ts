@@ -1,6 +1,5 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { getServerAuthSession } from "@/lib/server-auth-session";
 import {
   BLANK_PROMPT_MESSAGE,
   isBlankPrompt,
@@ -23,12 +22,9 @@ const promptRequestSchema = z
     path: ["content"],
   });
 
+// The control plane authenticates the forwarded session cookie (and answers
+// 401 without one), so a separate session lookup here would only delay the send.
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const session = await getServerAuthSession();
-  if (!session?.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   const { id: sessionId } = await params;
 
   try {

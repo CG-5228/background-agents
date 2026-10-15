@@ -178,7 +178,8 @@ export default function Home() {
   });
   const [modelPreferenceDraft, setModelPreferenceDraft] = useState<ModelPreference | null>(null);
   const [harness, setHarness] = useState<HarnessId>(DEFAULT_HARNESS);
-  const { prompt, setPrompt, clearSubmittedPrompt } = usePromptDraft(NEW_SESSION_PROMPT_DRAFT_ID);
+  const { prompt, setPrompt, clearSubmittedPrompt, unstoreSubmittedPrompt, restoreUnsentPrompt } =
+    usePromptDraft(NEW_SESSION_PROMPT_DRAFT_ID);
   const [warmRequested, setWarmRequested] = useState(false);
   const [skillSelection, setSkillSelection] = useState<SessionSkillSelection>({ mode: "all" });
   const [providerSelections, setProviderSelections] = useState<ModelProviderSelections>({});
@@ -188,6 +189,13 @@ export default function Home() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const submitInFlightRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const hasHydratedModelPreferencesRef = useRef(false);
   const { enabledModels, enabledModelOptions, loading: loadingEnabledModels } = useEnabledModels();
   const targetRequestFields = buildRequestFields();
@@ -316,10 +324,9 @@ export default function Home() {
   );
   const {
     identity: warmIdentity,
-    sessionId: pendingSessionId,
-    isWarming: isCreatingSession,
     warm: createSessionForWarming,
-    consume: consumeWarmSession,
+    claim: claimWarmSession,
+    release: releaseWarmSession,
     error: creationError,
   } = useWarmDraftSession(warmRequest, warmRoutingIdentity);
 
@@ -400,12 +407,17 @@ export default function Home() {
     setCreating(true);
     setError("");
 
+    const launchIdentity = warmIdentity;
+    const submittedPrompt = prompt;
+    // Until the send is confirmed, a composer mounted elsewhere must not offer
+    // this text again; it is handed back if the send fails.
+    unstoreSubmittedPrompt(submittedPrompt);
+    let sessionId: string | null = null;
+    let sent = false;
     try {
-      let sessionId = pendingSessionId;
-      if (!sessionId) {
-        sessionId = await createSessionForWarming();
-      }
-
+      // The draft is ours from here on: leaving the page or changing the
+      // launch target no longer discards it underneath the send.
+      sessionId = await claimWarmSession();
       if (!sessionId) {
         setError("Failed to create session");
         return;
@@ -424,7 +436,7 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          content: prompt.trim() || DEFAULT_ATTACHMENT_ONLY_MESSAGE,
+          content: submittedPrompt.trim() || DEFAULT_ATTACHMENT_ONLY_MESSAGE,
           model: selectedModel,
           reasoningEffort,
           ...(attachments && attachments.length > 0 ? { attachments } : {}),
@@ -432,26 +444,36 @@ export default function Home() {
       });
 
       if (res.ok) {
-        consumeWarmSession(sessionId);
-        clearSubmittedPrompt(prompt);
+        sent = true;
+        clearSubmittedPrompt(submittedPrompt);
         sessionAttachments.clearAttachments();
         mutate(isUnarchivedSessionListKey);
         mutate(isSessionInboxKey);
-        router.push(`/session/${sessionId}`);
-      } else {
-        if (res.status === 403) {
-          const message = await sessionActionErrorMessage(res, "Failed to send prompt");
-          toast.error(message);
-          setError(message);
+        const href = `/session/${sessionId}`;
+        // The author may have moved on while the send was in flight; taking
+        // them back would undo where they chose to go.
+        if (mountedRef.current) {
+          router.push(href);
         } else {
-          const data = await res.json();
-          setError(data.error || "Failed to send prompt");
+          toast.success("Session started", {
+            action: { label: "Open", onClick: () => router.push(href) },
+          });
         }
-        setCreating(false);
+      } else if (res.status === 403) {
+        const message = await sessionActionErrorMessage(res, "Failed to send prompt");
+        toast.error(message);
+        setError(message);
+      } else {
+        const data = await res.json().catch(() => null);
+        setError(data?.error || "Failed to send prompt");
       }
     } catch (_error) {
       setError("Failed to create session");
     } finally {
+      if (!sent) {
+        restoreUnsentPrompt(submittedPrompt);
+        if (sessionId) releaseWarmSession(sessionId, launchIdentity);
+      }
       submitInFlightRef.current = false;
       setCreating(false);
     }
@@ -496,7 +518,6 @@ export default function Home() {
         onRemove: sessionAttachments.removeAttachment,
       }}
       creating={creating}
-      isCreatingSession={isCreatingSession}
       providerSelectionsHydrated={providerSelectionsHydrated}
       error={creationError?.message ?? error}
       handleSubmit={handleSubmit}
@@ -534,7 +555,6 @@ function HomeContent({
   handlePromptChange,
   attachments,
   creating,
-  isCreatingSession,
   providerSelectionsHydrated,
   error,
   handleSubmit,
@@ -574,7 +594,6 @@ function HomeContent({
     onRemove: (id: string) => void;
   };
   creating: boolean;
-  isCreatingSession: boolean;
   providerSelectionsHydrated: boolean;
   error: string;
   handleSubmit: (e: React.FormEvent) => void;
@@ -705,11 +724,6 @@ function HomeContent({
                   />
                   {/* Submit button */}
                   <div className="absolute bottom-3 right-3 flex items-center gap-2">
-                    {isCreatingSession && (
-                      <span className="whitespace-nowrap text-xs text-accent">
-                        Warming sandbox...
-                      </span>
-                    )}
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}

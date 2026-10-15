@@ -246,6 +246,8 @@ export function toSessionListQuery(
     limit: page.limit,
     offset: page.offset,
     ...(query.lifecycle === "archived" ? { status: "archived" as const } : {}),
+    // Unprompted composer drafts are not sessions anyone started.
+    excludeDrafts: true,
     ...(query.lifecycle === "nonarchived" ? { excludeStatus: "archived" as const } : {}),
     ...(query.creator === "mine" ? { createdBy: [SESSION_LIST_CURRENT_USER] } : {}),
     ...(q ? { q } : {}),

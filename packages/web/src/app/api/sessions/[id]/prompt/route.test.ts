@@ -19,6 +19,25 @@ describe("session prompt API route", () => {
     vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "user-1" } } as never);
   });
 
+  it("leaves authentication to the control plane and propagates its 401", async () => {
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ error: "Unauthorized" }, { status: 401 })
+    );
+
+    const response = await POST(
+      new Request("http://localhost/api/sessions/session-1/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "Fix the flaky test" }),
+      }) as never,
+      { params: Promise.resolve({ id: "session-1" }) }
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "Unauthorized" });
+    expect(getServerAuthSession).not.toHaveBeenCalled();
+  });
+
   it("rejects blank prompts without attachments before proxying", async () => {
     const response = await POST(
       new Request("http://localhost/api/sessions/session-1/prompt", {

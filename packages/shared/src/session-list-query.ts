@@ -25,6 +25,7 @@ export const SESSION_LIST_QUERY_PARAMS = [
   "offset",
   "excludeStatus",
   "excludeAutomationLineage",
+  "excludeDrafts",
   "createdBy",
   "q",
   "repoOwner",
@@ -45,6 +46,11 @@ export interface SessionListQuery {
   status?: SessionStatus;
   excludeStatus?: SessionStatus;
   excludeAutomationLineage?: boolean;
+  /**
+   * Leave out drafts: sessions still `created`, which the web composer warms
+   * before its first prompt. They are not sessions a person started yet.
+   */
+  excludeDrafts?: boolean;
   createdBy?: readonly string[];
   /**
    * Bounded discovery search. Matches a session when the trimmed text is a
@@ -82,6 +88,7 @@ export type ParsedSessionListQuery = SessionListQuery & {
   limit: number;
   offset: number;
   excludeAutomationLineage: boolean;
+  excludeDrafts: boolean;
   createdBy: string[];
 };
 
@@ -139,6 +146,7 @@ export function parseSessionListQuery(searchParams: URLSearchParams): SessionLis
   const statusParam = searchParams.get("status");
   const excludeStatusParam = searchParams.get("excludeStatus");
   const excludeAutomationLineageParam = searchParams.get("excludeAutomationLineage");
+  const excludeDraftsParam = searchParams.get("excludeDrafts");
   const status = parseStatus(statusParam);
   const excludeStatus = parseStatus(excludeStatusParam);
 
@@ -152,6 +160,13 @@ export function parseSessionListQuery(searchParams: URLSearchParams): SessionLis
     excludeAutomationLineageParam !== "false"
   ) {
     return { success: false, invalidParam: "excludeAutomationLineage" };
+  }
+  if (
+    excludeDraftsParam !== null &&
+    excludeDraftsParam !== "true" &&
+    excludeDraftsParam !== "false"
+  ) {
+    return { success: false, invalidParam: "excludeDrafts" };
   }
 
   const createdBy = searchParams.getAll("createdBy");
@@ -212,6 +227,7 @@ export function parseSessionListQuery(searchParams: URLSearchParams): SessionLis
       status,
       excludeStatus,
       excludeAutomationLineage: excludeAutomationLineageParam === "true",
+      excludeDrafts: excludeDraftsParam === "true",
       createdBy,
       ...(q ? { q } : {}),
       ...(repoOwner !== undefined && repoName !== undefined ? { repoOwner, repoName } : {}),
@@ -235,6 +251,7 @@ export function serializeSessionListQuery(query: SessionListQuery): URLSearchPar
   if (query.excludeAutomationLineage) {
     searchParams.set("excludeAutomationLineage", "true");
   }
+  if (query.excludeDrafts) searchParams.set("excludeDrafts", "true");
   for (const value of query.createdBy ?? []) searchParams.append("createdBy", value);
   const q = query.q?.trim();
   if (q) searchParams.set("q", q);

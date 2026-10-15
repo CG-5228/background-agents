@@ -122,13 +122,16 @@ describe("sessions API route (POST)", () => {
     vi.resetAllMocks();
   });
 
-  it("returns 401 when the user session is missing", async () => {
-    vi.mocked(getServerAuthSession).mockResolvedValue(null);
+  it("leaves authentication to the control plane and propagates its 401", async () => {
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ error: "Unauthorized" }, { status: 401 })
+    );
 
     const response = await POST(postRequest({ repoOwner: "o", repoName: "r" }));
 
     expect(response.status).toBe(401);
-    expect(controlPlaneUserFetch).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({ error: "Unauthorized" });
+    expect(getServerAuthSession).not.toHaveBeenCalled();
   });
 
   it.each([

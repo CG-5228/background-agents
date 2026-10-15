@@ -814,6 +814,33 @@ export class SessionIndexStore {
     return new SessionStatusProjectionStore(this.db).archiveOrphanedDraft(id);
   }
 
+  /**
+   * Remove the index row of a draft its Durable Object has just expired.
+   *
+   * Only call this after `/internal/expire-draft` answered `archived`: that is
+   * the Durable Object confirming the session never held a message, so the row
+   * describes nothing a user could want back. Deleting rather than leaving it
+   * archived keeps abandoned drafts out of the Archived list. The status guard
+   * covers a row whose `archived` projection has not landed yet, and leaves any
+   * row that somehow moved on alone. Dependent rows go with it through their
+   * `ON DELETE CASCADE` foreign keys.
+   */
+  async deleteExpiredDraft(id: string): Promise<boolean> {
+    const result = await this.db
+      .prepare("DELETE FROM sessions WHERE id = ? AND status IN ('created', 'archived')")
+      .bind(id)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  async updateModel(id: string, model: string, reasoningEffort: string | null): Promise<boolean> {
+    const result = await this.db
+      .prepare("UPDATE sessions SET model = ?, reasoning_effort = ? WHERE id = ?")
+      .bind(model, reasoningEffort, id)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
   async touchUpdatedAt(id: string): Promise<boolean> {
     const result = await this.db
       .prepare("UPDATE sessions SET updated_at = ? WHERE id = ?")

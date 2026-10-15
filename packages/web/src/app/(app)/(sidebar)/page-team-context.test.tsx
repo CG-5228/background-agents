@@ -135,7 +135,10 @@ describe("Home team context", () => {
         "Session access: Workspace; team context: No team"
       );
       await waitFor(() =>
-        expect(fetch).toHaveBeenCalledWith("/api/sessions/session-1/archive", expect.anything())
+        expect(fetch).toHaveBeenCalledWith(
+          "/api/sessions/session-1/discard-draft",
+          expect.anything()
+        )
       );
       expect(
         vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/sessions")
@@ -165,7 +168,7 @@ describe("Home team context", () => {
     await waitFor(() => expect(sessionCreateBody()).toBeDefined());
     await selectAudience(user, "Private");
     await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith("/api/sessions/session-1/archive", expect.anything())
+      expect(fetch).toHaveBeenCalledWith("/api/sessions/session-1/discard-draft", expect.anything())
     );
     expect(
       vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/sessions")
@@ -213,7 +216,34 @@ describe("Home team context", () => {
     );
   });
 
-  it("archives a draft on model change without creating its replacement until submit", async () => {
+  it("keeps the draft when the model changes within its provider, and sends the new model", async () => {
+    mocks.enabledModelsValue.push("anthropic/claude-opus-4-6");
+    mocks.enabledModelOptionsValue[0].models.push({
+      id: "anthropic/claude-opus-4-6",
+      name: "Claude Opus 4.6",
+      description: "",
+    });
+    const user = userEvent.setup();
+    render(<Home />);
+    await user.type(screen.getByPlaceholderText("What do you want to build?"), "Ship it");
+    await waitFor(() => expect(sessionCreateBody()).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "Switch model to Claude Opus 4.6" }));
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(mocks.routerPush).toHaveBeenCalledWith("/session/session-1"));
+    const urls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(urls.filter((url) => url === "/api/sessions")).toHaveLength(1);
+    expect(urls.some((url) => url.endsWith("/discard-draft"))).toBe(false);
+    const promptCall = vi
+      .mocked(fetch)
+      .mock.calls.find(([url]) => String(url) === "/api/sessions/session-1/prompt");
+    expect(JSON.parse(String(promptCall?.[1]?.body))).toMatchObject({
+      model: "anthropic/claude-opus-4-6",
+    });
+  });
+
+  it("discards a draft on a provider change without creating its replacement until submit", async () => {
     mocks.enabledModelsValue.push("openai/gpt-5.4");
     mocks.enabledModelOptionsValue.push({
       category: "OpenAI",
@@ -231,7 +261,7 @@ describe("Home team context", () => {
     await waitFor(() => expect(sessionCreateBody()).toBeDefined());
     await user.click(screen.getByRole("button", { name: "Switch model to GPT-5.4" }));
     await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith("/api/sessions/session-1/archive", expect.anything())
+      expect(fetch).toHaveBeenCalledWith("/api/sessions/session-1/discard-draft", expect.anything())
     );
     expect(
       vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/sessions")
@@ -305,7 +335,7 @@ describe("Home team context", () => {
     );
   });
 
-  it("uses the active team's defaults and archives the warm draft on visibility and team changes", async () => {
+  it("uses the active team's defaults and discards the warm draft on visibility and team changes", async () => {
     const user = userEvent.setup();
     mocks.teams = [team(), team({ id: "team-2", name: "Design", defaultVisibility: "workspace" })];
     mocks.activeTeamId = "team-1";
@@ -316,7 +346,7 @@ describe("Home team context", () => {
     );
     await selectAudience(user, "Workspace");
     await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith("/api/sessions/session-1/archive", expect.anything())
+      expect(fetch).toHaveBeenCalledWith("/api/sessions/session-1/discard-draft", expect.anything())
     );
     expect(
       vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/sessions")
@@ -355,7 +385,7 @@ describe("Home team context", () => {
     expect(
       vi
         .mocked(fetch)
-        .mock.calls.filter(([url]) => String(url) === "/api/sessions/session-1/archive")
+        .mock.calls.filter(([url]) => String(url) === "/api/sessions/session-1/discard-draft")
     ).toHaveLength(2);
   });
 
@@ -486,7 +516,7 @@ describe("Home team context", () => {
     expect(
       vi
         .mocked(fetch)
-        .mock.calls.filter(([url]) => String(url) === "/api/sessions/session-1/archive")
+        .mock.calls.filter(([url]) => String(url) === "/api/sessions/session-1/discard-draft")
     ).toHaveLength(1);
   });
 

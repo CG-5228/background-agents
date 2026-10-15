@@ -104,7 +104,7 @@ describe("command-menu recent session scope", () => {
       );
       fireEvent.click(screen.getAllByRole("button", { name: /Quick search recent sessions/ })[0]);
       expect(mocks.useSWR).toHaveBeenCalledWith(
-        `/api/sessions?limit=100&offset=0&excludeStatus=archived${suffix ? `&${suffix}` : ""}`,
+        `/api/sessions?limit=100&offset=0&excludeStatus=archived&excludeDrafts=true${suffix ? `&${suffix}` : ""}`,
         expect.any(Function)
       );
       expect(mocks.commandMenu).toHaveBeenLastCalledWith(
@@ -137,7 +137,7 @@ describe("command-menu recent session scope", () => {
       </SidebarLayout>
     );
     expect(mocks.useSWR).toHaveBeenCalledWith(
-      "/api/sessions?limit=100&offset=0&excludeStatus=archived&teamIds%5B%5D=team_beta",
+      "/api/sessions?limit=100&offset=0&excludeStatus=archived&excludeDrafts=true&teamIds%5B%5D=team_beta",
       expect.any(Function)
     );
   });
@@ -170,7 +170,7 @@ describe("command-menu recent session scope", () => {
 
       expect(mocks.activeTeamId).toBeNull();
       expect(mocks.useSWR).toHaveBeenCalledWith(
-        `/api/sessions?limit=100&offset=0&excludeStatus=archived${nextScope ? `&scope=${nextScope}` : ""}`,
+        `/api/sessions?limit=100&offset=0&excludeStatus=archived&excludeDrafts=true${nextScope ? `&scope=${nextScope}` : ""}`,
         expect.any(Function)
       );
       expect(mocks.commandMenu).toHaveBeenLastCalledWith(

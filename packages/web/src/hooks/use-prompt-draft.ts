@@ -91,11 +91,40 @@ export function usePromptDraft(draftId: string) {
     [storageKey]
   );
 
+  /**
+   * Stops persisting a prompt while its send is in flight, so a composer that
+   * mounts meanwhile (the author came back mid-send) does not offer it again
+   * and start a second session. The text stays on screen in this composer.
+   */
+  const unstoreSubmittedPrompt = useCallback(
+    (submitted: string) => {
+      if (storageKey && readStoredPromptDraft(storageKey)?.prompt === submitted) {
+        writeStoredPromptDraft(storageKey, null);
+      }
+    },
+    [storageKey]
+  );
+
+  /**
+   * Hands back a prompt whose send failed, unless a newer draft has taken its
+   * place: this composer may have unmounted, and another may hold new text.
+   */
+  const restoreUnsentPrompt = useCallback(
+    (unsent: string) => {
+      if (storageKey && !readStoredPromptDraft(storageKey)) {
+        writeStoredPromptDraft(storageKey, { prompt: unsent, pendingRequest: null });
+      }
+    },
+    [storageKey]
+  );
+
   return {
     prompt,
     promptRef,
     setPrompt,
     clearSubmittedPrompt,
+    unstoreSubmittedPrompt,
+    restoreUnsentPrompt,
     pendingRequestRef,
     setPendingRequest,
   };

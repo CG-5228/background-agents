@@ -8,7 +8,7 @@ import type { SessionSkillSelection } from "@open-inspect/shared/types/skills";
 import type { SessionVisibility } from "@open-inspect/shared/types/teams";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 import type { SessionTargetRequestFields } from "@/lib/session-target";
-import { retireWarmDraftSession } from "@/lib/warm-session";
+import { discardWarmDraftSession } from "@/lib/warm-session";
 import type { InteractiveProviderRoutingIdentity } from "@/lib/provider-selection";
 
 export type WarmDraftSessionRequest = SessionTargetRequestFields & {
@@ -29,11 +29,21 @@ interface WarmDraftSessionError {
   terminal: boolean;
 }
 
+/**
+ * What a warm draft is bound to. Of the model only its provider counts: every
+ * prompt carries its own model and effort, and the first one sets the
+ * session's, so switching between one provider's models while typing keeps the
+ * draft (and its booting sandbox). The provider stays because create checks it
+ * against the harness and the provider's auth mode, and a new provider is how a
+ * draft refused for those reasons gets another try.
+ */
 export function warmDraftSessionIdentity(
   request: WarmDraftSessionRequest | null,
   routingIdentity?: InteractiveProviderRoutingIdentity
 ): string | null {
   if (!request) return null;
+  const { model, reasoningEffort: _reasoningEffort, ...launchTarget } = request;
+  const modelProvider = model.slice(0, model.indexOf("/"));
   const canonicalize = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(canonicalize);
     if (value && typeof value === "object") {
@@ -46,9 +56,27 @@ export function warmDraftSessionIdentity(
     }
     return value;
   };
-  return JSON.stringify(canonicalize({ request, routingIdentity }));
+  return JSON.stringify(
+    canonicalize({ request: { ...launchTarget, modelProvider }, routingIdentity })
+  );
 }
 
+interface PendingCreation {
+  promise: Promise<string | null>;
+  /** A submit owns the result; the hook must not discard it. */
+  claimed: boolean;
+}
+
+/**
+ * Keeps one draft session ready for the composer's current request.
+ *
+ * Creation is never aborted: the server finishes creating a draft whether or
+ * not the browser is still listening, so an abort only loses track of it. A
+ * creation that resolves after its draft was superseded, or after the composer
+ * unmounted, is discarded instead. A submit `claim`s the draft, after which
+ * neither unmount nor a request change discards it; `release` hands back one
+ * whose first prompt was not sent.
+ */
 export function useWarmDraftSession(
   request: WarmDraftSessionRequest | null,
   routingIdentity?: InteractiveProviderRoutingIdentity
@@ -57,8 +85,8 @@ export function useWarmDraftSession(
   const requestRef = useRef(request);
   const identityRef = useRef(identity);
   const sessionIdRef = useRef<string | null>(null);
-  const creationRef = useRef<Promise<string | null> | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const pendingRef = useRef<PendingCreation | null>(null);
+  const disposedRef = useRef(false);
   const errorRef = useRef<WarmDraftSessionError | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isWarming, setIsWarming] = useState(false);
@@ -70,9 +98,7 @@ export function useWarmDraftSession(
   }, [identity, request]);
 
   useLayoutEffect(() => {
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
-    creationRef.current = null;
+    pendingRef.current = null;
     setIsWarming(false);
     errorRef.current = null;
     setError(null);
@@ -80,44 +106,45 @@ export function useWarmDraftSession(
     const supersededSessionId = sessionIdRef.current;
     sessionIdRef.current = null;
     setSessionId(null);
-    if (supersededSessionId) void retireWarmDraftSession(supersededSessionId);
+    if (supersededSessionId) void discardWarmDraftSession(supersededSessionId);
   }, [identity]);
 
-  useEffect(
-    () => () => {
-      identityRef.current = null;
-      abortControllerRef.current?.abort();
-      if (sessionIdRef.current) void retireWarmDraftSession(sessionIdRef.current);
-    },
-    []
-  );
+  useEffect(() => {
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
+      const abandonedSessionId = sessionIdRef.current;
+      sessionIdRef.current = null;
+      if (abandonedSessionId) void discardWarmDraftSession(abandonedSessionId);
+    };
+  }, []);
 
   const warm = useCallback(async (): Promise<string | null> => {
     if (sessionIdRef.current) return sessionIdRef.current;
-    if (creationRef.current) return creationRef.current;
+    if (pendingRef.current) return pendingRef.current.promise;
     if (errorRef.current?.terminal) return null;
 
     const launchRequest = requestRef.current;
     const launchIdentity = identityRef.current;
     if (!launchRequest || !launchIdentity) return null;
 
-    const abortController = new AbortController();
-    abortControllerRef.current = abortController;
     setIsWarming(true);
     errorRef.current = null;
     setError(null);
 
-    const creation = (async () => {
+    const pending: PendingCreation = { promise: Promise.resolve(null), claimed: false };
+    const isCurrent = () => !disposedRef.current && identityRef.current === launchIdentity;
+
+    pending.promise = (async () => {
       try {
         const response = await browserApiFetch("/api/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(launchRequest),
-          signal: abortController.signal,
         });
         if (!response.ok) {
           const failure: unknown = await response.json().catch(() => null);
-          if (identityRef.current !== launchIdentity || abortController.signal.aborted) return null;
+          if (!pending.claimed && !isCurrent()) return null;
           let message = "Failed to create session";
           let code: string | null = null;
           if (failure && typeof failure === "object") {
@@ -150,8 +177,9 @@ export function useWarmDraftSession(
         );
         if (!parsed.success) return null;
         const { sessionId } = parsed.data;
-        if (identityRef.current !== launchIdentity || abortController.signal.aborted) {
-          void retireWarmDraftSession(sessionId);
+        if (pending.claimed) return sessionId;
+        if (!isCurrent()) {
+          void discardWarmDraftSession(sessionId);
           return null;
         }
 
@@ -159,28 +187,51 @@ export function useWarmDraftSession(
         setSessionId(sessionId);
         return sessionId;
       } catch (error) {
-        if (!(error instanceof Error && error.name === "AbortError")) {
-          console.error("Failed to create session for warming:", error);
-        }
+        console.error("Failed to create session for warming:", error);
         return null;
       } finally {
-        if (abortControllerRef.current === abortController) {
-          abortControllerRef.current = null;
-          creationRef.current = null;
+        if (pendingRef.current === pending) {
+          pendingRef.current = null;
           setIsWarming(false);
         }
       }
     })();
 
-    creationRef.current = creation;
-    return creation;
+    pendingRef.current = pending;
+    return pending.promise;
   }, []);
 
-  const consume = useCallback((consumedSessionId: string) => {
-    if (sessionIdRef.current !== consumedSessionId) return;
-    sessionIdRef.current = null;
-    setSessionId(null);
+  /** Takes ownership of the ready or in-flight draft, starting one if needed. */
+  const claim = useCallback(async (): Promise<string | null> => {
+    const ready = sessionIdRef.current;
+    if (ready) {
+      sessionIdRef.current = null;
+      setSessionId(null);
+      return ready;
+    }
+    if (!pendingRef.current) void warm();
+    const pending = pendingRef.current;
+    if (!pending) return null;
+    pending.claimed = true;
+    pendingRef.current = null;
+    setIsWarming(false);
+    return pending.promise;
+  }, [warm]);
+
+  /**
+   * Hands back a claimed draft whose first prompt was not sent. It becomes the
+   * warm draft again while the composer still wants that launch, and is
+   * discarded otherwise. The discard is a no-op for a session that did receive
+   * the prompt, so an ambiguous failure cannot lose work.
+   */
+  const release = useCallback((releasedSessionId: string, launchIdentity: string | null) => {
+    if (disposedRef.current || launchIdentity !== identityRef.current || sessionIdRef.current) {
+      void discardWarmDraftSession(releasedSessionId);
+      return;
+    }
+    sessionIdRef.current = releasedSessionId;
+    setSessionId(releasedSessionId);
   }, []);
 
-  return { identity, sessionId, isWarming, warm, consume, error };
+  return { identity, sessionId, isWarming, warm, claim, release, error };
 }

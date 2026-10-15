@@ -185,7 +185,13 @@ export class SessionLifecycleHandler {
    * The web client warms a session on the first keystroke, so navigating away
    * without submitting leaves a `created` row whose sandbox idles out — and no
    * other transition reaches it, because `active` needs an enqueued prompt and
-   * the terminal statuses need a finished execution.
+   * the terminal statuses need a finished execution. The composer discards its
+   * draft through here as soon as it is abandoned, and the sweep catches the
+   * rest.
+   *
+   * The draft's sandbox is destroyed rather than preserved: it never ran any
+   * work, and a composer discard arrives seconds after the warm spawn, when the
+   * sandbox would otherwise idle until its inactivity timeout.
    *
    * The sweep selects candidates from the D1 index, which it may have read
    * before a prompt arrived. Re-checking here is what makes that safe: the
@@ -227,6 +233,7 @@ export class SessionLifecycleHandler {
     }
 
     await this.statusService.transition("archived");
+    await this.sandboxLifecycle.cancelSandbox();
 
     return Response.json({ outcome: "archived", status: "archived" });
   }

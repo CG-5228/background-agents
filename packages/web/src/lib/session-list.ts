@@ -28,13 +28,16 @@ const SESSIONS_PAGE_SIZE = DEFAULT_SESSION_LIST_LIMIT;
 const COMMAND_MENU_SESSIONS_LIMIT = 100;
 const SESSIONS_API_PATH = "/api/sessions";
 export const CURRENT_USER_CREATED_BY = SESSION_LIST_CURRENT_USER;
+// Unprompted composer drafts are left out: they are not sessions anyone started.
 export const SIDEBAR_SESSIONS_KEY = buildSessionsPageKey({
   excludeStatus: "archived",
+  excludeDrafts: true,
   limit: SESSIONS_PAGE_SIZE,
   offset: 0,
 });
 export const COMMAND_MENU_SESSIONS_KEY = buildSessionsPageKey({
   excludeStatus: "archived",
+  excludeDrafts: true,
   limit: COMMAND_MENU_SESSIONS_LIMIT,
 });
 

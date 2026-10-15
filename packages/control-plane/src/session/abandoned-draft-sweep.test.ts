@@ -32,6 +32,7 @@ function createIndex(ids: string[] | Error, archiveError?: Error): AbandonedDraf
       if (archiveError) throw archiveError;
       return true;
     }),
+    deleteExpiredDraft: vi.fn(async () => true),
   };
 }
 
@@ -55,14 +56,9 @@ describe("AbandonedDraftSweep", () => {
     expect(index.listAbandonedDraftSessionIds).toHaveBeenCalledWith(NOW - TTL_MS, 50);
   });
 
-  it("archives every candidate the session confirms", async () => {
-    const sweep = new AbandonedDraftSweep(
-      createIndex(["a", "b"]),
-      createClient(),
-      createLog(),
-      TTL_MS,
-      50
-    );
+  it("expires every candidate the session confirms and deletes its index row", async () => {
+    const index = createIndex(["a", "b"]);
+    const sweep = new AbandonedDraftSweep(index, createClient(), createLog(), TTL_MS, 50);
 
     const result = await sweep.run(NOW);
 
@@ -75,11 +71,14 @@ describe("AbandonedDraftSweep", () => {
       errored: 0,
       truncated: false,
     });
+    expect(index.deleteExpiredDraft).toHaveBeenCalledWith("a");
+    expect(index.deleteExpiredDraft).toHaveBeenCalledWith("b");
   });
 
   it("separates the two reasons a session declines to expire", async () => {
+    const index = createIndex(["archived-one", "started-work", "queued-work"]);
     const sweep = new AbandonedDraftSweep(
-      createIndex(["archived-one", "started-work", "queued-work"]),
+      index,
       createClient({ "started-work": "not_draft", "queued-work": "has_work" }),
       createLog(),
       TTL_MS,
@@ -97,6 +96,9 @@ describe("AbandonedDraftSweep", () => {
       hasWork: 1,
       errored: 0,
     });
+    // Only a session the runtime confirmed empty loses its index row.
+    expect(index.deleteExpiredDraft).toHaveBeenCalledTimes(1);
+    expect(index.deleteExpiredDraft).toHaveBeenCalledWith("archived-one");
   });
 
   it("isolates a failing session from the rest of the batch", async () => {
@@ -176,6 +178,7 @@ describe("AbandonedDraftSweep", () => {
     // A 404 proves there is no durable object state to diverge from, so the
     // index row can be retired directly.
     expect(index.archiveOrphanedDraft).toHaveBeenCalledWith("orphan");
+    expect(index.deleteExpiredDraft).not.toHaveBeenCalled();
     expect(result).toMatchObject({ candidates: 1, missing: 1, archived: 0, errored: 0 });
   });
 

@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => {
     userId: "user-1",
     routerPush: vi.fn(),
     toastError: vi.fn(),
+    toastSuccess: vi.fn(),
     mutateMock: vi.fn(),
     reposValue: [] as Array<{
       id: number;
@@ -149,7 +150,7 @@ vi.mock("@/hooks/use-active-team", () => ({
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.routerPush }),
 }));
-vi.mock("sonner", () => ({ toast: { error: mocks.toastError } }));
+vi.mock("sonner", () => ({ toast: { error: mocks.toastError, success: mocks.toastSuccess } }));
 
 vi.mock("swr", () => ({
   // Home uses the default export only for the picker's prebuild-status text.
@@ -192,6 +193,9 @@ vi.mock("@/components/model-reasoning-selector", () => ({
       </button>
       <button type="button" onClick={() => onModelChange("openai/gpt-5.4")}>
         Switch model to GPT-5.4
+      </button>
+      <button type="button" onClick={() => onModelChange("anthropic/claude-opus-4-6")}>
+        Switch model to Claude Opus 4.6
       </button>
       {onHarnessChange && (
         <>
@@ -288,6 +292,7 @@ beforeEach(() => {
   mocks.setActiveTeam.mockReset();
   mocks.routerPush.mockReset();
   mocks.toastError.mockReset();
+  mocks.toastSuccess.mockReset();
   mocks.mutateMock.mockReset();
   // Radix Checkbox measures itself via ResizeObserver, which jsdom lacks.
   vi.stubGlobal(
@@ -308,7 +313,7 @@ beforeEach(() => {
       if (url === "/api/sessions/session-1/prompt") {
         return Response.json({ ok: true });
       }
-      if (url === "/api/sessions/session-1/archive") {
+      if (url === "/api/sessions/session-1/discard-draft") {
         return Response.json({ ok: true });
       }
       return Response.json({ error: "unexpected request" }, { status: 500 });
