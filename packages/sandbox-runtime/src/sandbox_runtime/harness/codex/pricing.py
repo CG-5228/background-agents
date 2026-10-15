@@ -84,14 +84,16 @@ async def load_codex_pricing(environ: Mapping[str, str], log: Any) -> dict[str, 
 
     try:
         async with asyncio.timeout(CATALOG_TIMEOUT_SECONDS):
-            async with httpx.AsyncClient(timeout=CATALOG_TIMEOUT_SECONDS) as client:
-                async with client.stream("GET", f"{DEFAULT_MODELS_URL}/api.json") as response:
-                    response.raise_for_status()
-                    payload = bytearray()
-                    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
-                        if len(payload) + len(chunk) > MAX_CATALOG_BYTES:
-                            raise ValueError("Model catalog exceeds size limit")
-                        payload.extend(chunk)
+            async with (
+                httpx.AsyncClient(timeout=CATALOG_TIMEOUT_SECONDS) as client,
+                client.stream("GET", f"{DEFAULT_MODELS_URL}/api.json") as response,
+            ):
+                response.raise_for_status()
+                payload = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                    if len(payload) + len(chunk) > MAX_CATALOG_BYTES:
+                        raise ValueError("Model catalog exceeds size limit")
+                    payload.extend(chunk)
         data = bytes(payload)
         refreshed = _catalog_models(data)
     except (httpx.HTTPError, TimeoutError, ValueError, RecursionError) as error:
