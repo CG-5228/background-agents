@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from sandbox_runtime.bridge import AgentBridge
+from sandbox_runtime.conversation_recovery import mark_recovery_pending
 from sandbox_runtime.harness import HarnessId, HarnessStartError, TurnOutcome, parse_harness_id
 from tests.conftest import ScriptedHarness
 
@@ -127,8 +128,8 @@ class TestSessionIdentity:
         bridge.session_id_file = tmp_path / "agent-session-id"
         bridge.legacy_session_id_file = tmp_path / "opencode-session-id"
 
-        await bridge._ensure_agent_session()
-        await bridge._ensure_agent_session()
+        mark_recovery_pending(bridge.session_id_file)
+        await harness.create_session()
 
         assert bridge.agent_session_id == harness.session_id == "oc-session-new"
         await bridge._persist_rotated_session_id(harness, strict=True)

@@ -141,4 +141,27 @@ describe("conversation recovery from durable events", () => {
       MAX_RECOVERY_CONTEXT_CHARS + 1
     );
   });
+
+  it("selects the newest recovery rows through a chronological index", () => {
+    const read = vi.spyOn(sql, "exec");
+    events.getRecoveryContext("current");
+    const [query, ...params] = read.mock.calls[0];
+    const plan = sql.exec(`EXPLAIN QUERY PLAN ${query}`, ...params).toArray() as Array<{
+      detail: string;
+    }>;
+    expect(plan.some(({ detail }) => detail.includes("idx_events_recovery_chronology"))).toBe(true);
+    expect(plan.some(({ detail }) => detail.includes("idx_events_type"))).toBe(false);
+  });
+
+  it("limits candidate rows before parsing older JSON payloads", () => {
+    events.createEvent({
+      id: "old-malformed",
+      type: "token",
+      messageId: "old",
+      data: "invalid legacy payload",
+      createdAt: 1,
+    });
+    for (let i = 0; i <= MAX_RECOVERY_CONTEXT_MESSAGES; i++) user(`valid-${i}`, "valid");
+    expect(() => events.getRecoveryContext("current")).not.toThrow();
+  });
 });

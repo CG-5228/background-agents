@@ -3,8 +3,29 @@ import { EventRepository, MAX_RECOVERY_CONTEXT_CHARS } from "../../src/session/e
 import { cleanD1Tables } from "./cleanup";
 import { initSession, seedEvents } from "./helpers";
 import { runInSessionDO } from "./session-do-access";
+import { initSchema } from "../../src/session/schema";
 
 beforeEach(cleanD1Tables);
+
+it("adds the bounded chronological access path to an existing session database", async () => {
+  const { stub } = await initSession();
+  const plan = await runInSessionDO(stub, (_instance, state) => {
+    state.storage.sql.exec("DROP INDEX idx_events_recovery_chronology");
+    initSchema(state.storage.sql);
+    return state.storage.sql
+      .exec(
+        `EXPLAIN QUERY PLAN
+      SELECT id FROM events INDEXED BY idx_events_recovery_chronology
+      WHERE type IN ('user_message', 'token') AND message_id != ?
+      ORDER BY created_at DESC, timeline_sequence DESC LIMIT ?`,
+        "current",
+        101
+      )
+      .toArray() as Array<{ detail: string }>;
+  });
+  expect(plan.some(({ detail }) => detail.includes("idx_events_recovery_chronology"))).toBe(true);
+  expect(plan.some(({ detail }) => detail.includes("TEMP B-TREE"))).toBe(false);
+});
 
 it("reads the previous conversation from real DO storage independently of sandbox memory", async () => {
   const { stub } = await initSession();

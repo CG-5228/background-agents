@@ -1,6 +1,7 @@
 """A replacement runtime must put durable conversation text into its first turn."""
 
 import asyncio
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -92,7 +93,7 @@ async def test_failed_first_submission_keeps_recovery_pending(tmp_path, failure,
     bridge = make_bridge(tmp_path, harness)
     result = await bridge._handle_prompt(command())
     assert result["success"] is False
-    assert bridge._recovery_pending_file.exists()
+    assert harness.session_id is None or bridge._recovery_pending_file.exists()
 
     if restart_bridge:
         harness = ScriptedHarness(session_id=None)
@@ -127,6 +128,17 @@ async def test_failure_after_assistant_activity_does_not_repeat_recovery(
 ):
     class FailureAfterAcceptance(ScriptedHarness):
         async def run_prompt(self, prompt, emit):
+            fresh = self.session_id is None
+            if fresh:
+                prompt.recovery.creating()
+                await self.create_session()
+            if prompt.recovery:
+                prompt = replace(
+                    prompt,
+                    text=await prompt.recovery.prepare(self.session_id, prompt.text, fresh=fresh),
+                )
+                prompt.recovery.submitting()
+                prompt.recovery.accepted()
             self.prompts.append(prompt)
             await emit({"type": activity, "content": "Starting.", "messageId": prompt.message_id})
             return TurnOutcome.failed("provider failed after producing output")

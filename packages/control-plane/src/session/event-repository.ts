@@ -73,12 +73,14 @@ export class EventRepository {
     // Queued prompts have no user_message event yet.
     const rows = this.sql
       .exec(
-        `WITH recent AS (
-           SELECT id, type, created_at, timeline_sequence,
-                  length(json_extract(data, '$.content')) AS chars
-           FROM events
+        `WITH recent_ids AS MATERIALIZED (
+           SELECT id, type, created_at, timeline_sequence
+           FROM events INDEXED BY idx_events_recovery_chronology
            WHERE type IN ('user_message', 'token') AND message_id != ?
            ORDER BY created_at DESC, timeline_sequence DESC LIMIT ?
+         ), recent AS (
+           SELECT recent_ids.*, length(json_extract(events.data, '$.content')) AS chars
+           FROM recent_ids JOIN events ON events.id = recent_ids.id
          ), budgeted AS (
            SELECT *, COALESCE(SUM(chars) OVER (
              ORDER BY created_at DESC, timeline_sequence DESC

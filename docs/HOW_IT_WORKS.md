@@ -359,10 +359,12 @@ follow-up prompts in an existing session are much faster than the first prompt.
 
 If the runtime cannot resume the agent's native conversation (for example, after a fresh sandbox
 replaces a lost one), the control plane supplies stored user and assistant text with the next
-prompt. The bridge includes that text until assistant activity or a successful turn confirms
-submission. Pending recovery survives bridge restarts and snapshots alongside the native session
-pointer. An existing native conversation continues with its own history. Recovery keeps the most
-recent text within the bounds defined by `MAX_RECOVERY_CONTEXT_MESSAGES` and
+prompt. The harness prepares recovery after native reopen/resume and commits it when native input
+acceptance is confirmed. Known pre-submission failures and rejections retain recovery for retry. An
+uncertain submission response is reported explicitly instead of automatically replaying into the
+same conversation. Pending recovery survives bridge restarts and snapshots alongside the native
+session pointer. An existing native conversation continues with its own history. Recovery keeps the
+most recent text within the bounds defined by `MAX_RECOVERY_CONTEXT_MESSAGES` and
 `MAX_RECOVERY_CONTEXT_CHARS` in the event repository. The timeline warns when this fallback is used
 and when text was truncated. Tool results, earlier attachments, and uncommitted files are not
 reconstructed by transcript recovery; the agent is told to verify the workspace before continuing.
