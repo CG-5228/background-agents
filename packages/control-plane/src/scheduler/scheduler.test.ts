@@ -4179,6 +4179,12 @@ describe("Scheduler", () => {
             firstPromptQueued: false,
             outcome: "deferred",
           },
+          {
+            state: "it failed before claiming a session",
+            run: { status: "failed", session_id: null },
+            firstPromptQueued: false,
+            outcome: "dropped",
+          },
         ])(
           "settles held follow-ups in the sweep when $state",
           async ({ run, firstPromptQueued, outcome }) => {
