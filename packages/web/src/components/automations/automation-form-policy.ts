@@ -194,6 +194,13 @@ function findInvalidEvaluation({
       return { valid: false, reason: "invalid-schedule" };
     }
   }
+  if (
+    draft.trigger.type === "webhook" &&
+    draft.trigger.repositoryFromPayload &&
+    (repositoryCount > 0 || environmentCount > 0)
+  ) {
+    return { valid: false, reason: "invalid-target-selection" };
+  }
   const targetError = validateAutomationTargetCounts(
     draft.trigger.type,
     repositoryCount,

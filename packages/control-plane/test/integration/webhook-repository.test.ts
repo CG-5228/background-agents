@@ -95,6 +95,7 @@ describe("Webhook repository resolution (real D1 and SessionDO)", () => {
     expect(messages[0].content).toContain("acme/api");
     expect(messages[0].content).toContain("release/next");
     expect(messages[0].content).toContain('"alert": "CI failed"');
+    expect(checkRepositoryAccess).toHaveBeenCalledOnce();
     expect(getBranchHead).toHaveBeenCalledWith(
       { owner: "acme", name: "api", branch: "release/next" },
       { kind: "repositories", repositoryIds: [101] }

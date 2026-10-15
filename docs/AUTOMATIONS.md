@@ -141,7 +141,9 @@ curl -X POST "https://<your-worker-url>/webhooks/automation/<automation-id>" \
 
 Use the automation API (`POST /automations` or `PUT /automations/:id`) to configure
 `triggerConfig.repositoryFromPayload` on a webhook automation. Keep `repositories` and
-`environmentIds` empty. The form preserves this API configuration when editing other fields.
+`environmentIds` empty. The form preserves this API configuration when editing other fields and
+shows a disabled payload-target state instead of the fixed-target picker. Change target mode through
+the API.
 
 ```json
 {
@@ -188,6 +190,10 @@ invocation without resolving the target again. A `sessionKey` follow-up must res
 session's repository and branch; a mismatch returns HTTP 409. Manual triggering requires a webhook
 payload and is refused for this mode. Automations without `repositoryFromPayload` retain their
 fixed-target behavior.
+
+Configuration and target edits are checked together inside the database transaction. If a concurrent
+edit would combine payload mode with fixed targets, the entire save is rolled back and returns HTTP
+409 with code `automation_conflict`. Reload the automation before retrying.
 
 ### What the Agent Receives
 

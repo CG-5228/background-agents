@@ -97,6 +97,10 @@ import {
 } from "./automation-validation";
 import { isAutomationExecutionAuthorized } from "../automation/authorization-guard";
 import { authorizeSessionTarget } from "./session-target-authorization";
+import {
+  bindAutomationTargetGuard,
+  isAutomationTargetConflict,
+} from "../db/automation-target-guard";
 import { authorizeTeamRepositories } from "./workspace-repository-authorization";
 
 const logger = createLogger("router:automations");
@@ -866,8 +870,39 @@ async function handleUpdateAutomation(
       ...slackStore.bindChannelStatements(id, extractSlackChannels(body.triggerConfig))
     );
   }
+  if (
+    body.triggerConfig !== undefined ||
+    replacementRepositories !== null ||
+    replacementEnvironmentIds !== null
+  ) {
+    statements.push(
+      ...bindAutomationTargetGuard(
+        db,
+        id,
+        body.triggerConfig === undefined
+          ? existing.trigger_config
+          : body.triggerConfig === null
+            ? null
+            : JSON.stringify(body.triggerConfig),
+        Boolean(finalTriggerConfig?.repositoryFromPayload)
+      )
+    );
+  }
   if (statements.length > 0) {
-    await ctx.db.batch(statements);
+    try {
+      await ctx.db.batch(statements);
+    } catch (mutationError) {
+      if (isAutomationTargetConflict(mutationError)) {
+        return json(
+          {
+            error: "Automation targets changed concurrently; reload and retry",
+            code: "automation_conflict",
+          },
+          409
+        );
+      }
+      throw mutationError;
+    }
   }
   const updated = await store.getById(id);
   if (!updated) return error("Automation not found", 404);

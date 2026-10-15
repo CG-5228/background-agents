@@ -4,15 +4,16 @@ import {
   validateRepositoryPathSegments,
   type RepositoryRef,
 } from "@open-inspect/shared/types/repositories";
-import type { SourceControlProvider } from "../source-control";
+import { SourceControlProviderError, type SourceControlProvider } from "../source-control";
 
 /** A delivery error the webhook sender can act on; no run/session has been created. */
 export class WebhookRepositoryResolutionError extends Error {
   constructor(
     message: string,
-    readonly status: 400 | 403 | 409 | 503 = 400
+    readonly status: 400 | 403 | 409 | 503 = 400,
+    options?: ErrorOptions
   ) {
-    super(message);
+    super(message, options);
     this.name = "WebhookRepositoryResolutionError";
   }
 }
@@ -106,9 +107,21 @@ export async function resolveWebhookRepository(
     };
   } catch (error) {
     if (error instanceof WebhookRepositoryResolutionError) throw error;
+    if (error instanceof SourceControlProviderError && error.errorType === "permanent") {
+      const forbidden =
+        error.httpStatus === 401 || error.httpStatus === 403 || error.httpStatus === 404;
+      throw new WebhookRepositoryResolutionError(
+        forbidden
+          ? "Repository or branch access was denied by the SCM provider"
+          : "Repository or branch lookup was rejected by the SCM provider",
+        forbidden ? 403 : 400,
+        { cause: error }
+      );
+    }
     throw new WebhookRepositoryResolutionError(
       "Repository or branch lookup failed; retry the webhook delivery",
-      503
+      503,
+      { cause: error }
     );
   }
 }

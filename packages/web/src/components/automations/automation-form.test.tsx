@@ -1569,6 +1569,13 @@ it("preserves API-configured payload repository paths when editing an automation
       }}
     />
   );
+  expect(screen.getByRole("button", { name: "Resolved from webhook payload" })).toBeDisabled();
+  expect(
+    screen.queryByRole("button", { name: "Repository Configuration" })
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByText(/Change this target configuration through the automation API/)
+  ).toBeInTheDocument();
   fireEvent.submit(container.querySelector("form")!);
   expect(onSubmit).toHaveBeenCalledWith(
     expect.objectContaining({ triggerConfig: { conditions: [], repositoryFromPayload } })

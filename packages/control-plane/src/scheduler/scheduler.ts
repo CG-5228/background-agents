@@ -48,8 +48,6 @@ import {
   type AutomationRunRow,
   type AutomationInvocationRow,
   type InvocationOverlapScope,
-  type AutomationRepositoryInsert,
-  type AutomationEnvironmentRow,
 } from "../db/automation-store";
 import {
   AutomationModelProviderAuthStore,
@@ -90,9 +88,10 @@ import { resolveManagedSkills } from "../session/skill-resolution";
 import { resolvedPin } from "../session/pinned";
 import { createSessionMemorySelector } from "../memory/session-memory-selector-factory";
 import {
-  resolveAutomationRepositories,
-  type AutomationRepositoryResolution,
-} from "../automation/repository";
+  loadInvocationTargets,
+  resolveInvocationTargets,
+  type InvocationTargetInput,
+} from "../automation/invocation-targets";
 import type { RepositoryRef } from "@open-inspect/shared/types/repositories";
 import {
   resolveWebhookRepository,
@@ -325,14 +324,10 @@ interface StartInvocationParams {
   concurrencyKey?: string | null;
   /** Source-specific JSON stored on the invocation (slack message coordinates). */
   triggerMetadata?: string | null;
-  /** Pre-fetched repository selection (the tick passes its batched fetch). */
-  repositories?: AutomationRepositoryInsert[];
-  /** Prevalidated payload target; never re-resolve its identity after branch validation. */
-  webhookRepository?: RepositoryRef;
+  /** One stored selection or prevalidated target snapshot for this firing. */
+  targets?: InvocationTargetInput;
   /** GitHub event identity that repository resolution must preserve. */
   eventRepositoryId?: number;
-  /** Pre-fetched environment selection (the tick passes its batched fetch). */
-  environments?: AutomationEnvironmentRow[];
   /** Complete prompt to use directly, or as the fallback for a lazy override. */
   instructionsOverride?: string;
   /**
@@ -521,19 +516,7 @@ export class Scheduler {
       return this.recordOverlapSkip(store, params, { advanceSchedule: true });
     }
 
-    const [selection, environmentSelection] = await Promise.all([
-      params.webhookRepository
-        ? [
-            {
-              repo_owner: params.webhookRepository.repoOwner,
-              repo_name: params.webhookRepository.repoName,
-              repo_id: params.webhookRepository.repoId,
-              base_branch: params.webhookRepository.baseBranch,
-            },
-          ]
-        : (params.repositories ?? store.getRepositoriesForAutomation(automation.id)),
-      params.environments ?? store.getEnvironmentsForAutomation(automation.id),
-    ]);
+    const targets = await loadInvocationTargets(store, automation.id, params.targets);
     // One snapshot of the owning team classifies denials and pins the grants version.
     const team =
       automation.owner_team_id === null
@@ -542,31 +525,14 @@ export class Scheduler {
     const authorization: AutomationExecutionAuthorizationRequest = {
       automationId: automation.id,
       executionUserId: executionPrincipal.platformUserId,
-      requiresRepositoryUse: selection.length > 0,
-      requiresEnvironmentUse: environmentSelection.length > 0,
+      requiresRepositoryUse: targets.repositories.length > 0,
+      requiresEnvironmentUse: targets.environments.length > 0,
     };
     if (!(await isAutomationExecutionAuthorized(this.db, authorization))) {
       return { outcome: "unauthorized", reason: executionDenialReason(team) };
     }
-    const resolutions: AutomationRepositoryResolution[] = params.webhookRepository
-      ? [
-          {
-            requested: selection[0],
-            repository: params.webhookRepository,
-            error: null,
-          },
-        ]
-      : await resolveAutomationRepositories(this.env, selection);
-    for (const resolution of resolutions) {
-      if (
-        params.eventRepositoryId !== undefined &&
-        resolution.repository !== null &&
-        resolution.repository.repoId !== params.eventRepositoryId
-      ) {
-        resolution.repository = null;
-        resolution.error = "Repository identity changed during event resolution";
-      }
-    }
+    const { repositories: resolutions, environments: environmentSelection } =
+      await resolveInvocationTargets(this.env, targets, params.eventRepositoryId);
 
     const invocationId = params.invocationId ?? generateId();
     const scheduledAt = params.scheduledAt ?? now;
@@ -605,10 +571,10 @@ export class Scheduler {
         status: resolution.error ? "failed" : "starting",
         failure_reason: resolution.error,
         completed_at: resolution.error ? now : null,
-        repo_owner: resolution.repository?.repoOwner ?? resolution.requested.repo_owner,
-        repo_name: resolution.repository?.repoName ?? resolution.requested.repo_name,
-        repo_id: resolution.repository?.repoId ?? resolution.requested.repo_id,
-        base_branch: resolution.repository?.baseBranch ?? resolution.requested.base_branch,
+        repo_owner: resolution.repository.repoOwner,
+        repo_name: resolution.repository.repoName,
+        repo_id: resolution.repository.repoId,
+        base_branch: resolution.repository.baseBranch,
       })),
       ...environmentSelection.map((environment): AutomationRunRow => ({
         ...childBase(),
@@ -986,8 +952,7 @@ export class Scheduler {
           source: "schedule",
           scheduledAt: automation.next_run_at!,
           advanceToNextRunAt: nextRunAt,
-          repositories,
-          environments,
+          targets: { kind: "stored", selection: { repositories, environments } },
         });
 
         switch (result.outcome) {
@@ -1233,7 +1198,7 @@ export class Scheduler {
         (automation, repositories) =>
           this.startInvocation(store, {
             automation,
-            repositories,
+            targets: { kind: "stored", selection: { repositories, environments: [] } },
             source: "event",
             triggerKey: event.triggerKey,
             concurrencyKey: event.concurrencyKey,
@@ -1520,12 +1485,15 @@ export class Scheduler {
       const result = await this.startInvocation(store, {
         automation,
         source: "event",
-        ...(webhookRepository
+        targets: webhookRepository
           ? {
-              webhookRepository,
-              environments: [],
+              kind: "resolved",
+              snapshot: {
+                repositories: [{ repository: webhookRepository, error: null }],
+                environments: [],
+              },
             }
-          : {}),
+          : undefined,
         invocationId: webhookClaim?.invocationId,
         webhookFollowUpClaimId: webhookClaim?.claimId,
         triggerKey: event.triggerKey,
