@@ -44,6 +44,9 @@ export interface SandboxLaunchConfig {
   /** Default model when the session has no override. */
   model: string;
   mcpServerLookup?: McpServerLookup;
+  opencodePluginLookup?: {
+    forSession(repositories: readonly { repoOwner: string; repoName: string }[]): Promise<string[]>;
+  };
   slackAgentNotifyLookup?: SlackAgentNotifyLookup;
 }
 
@@ -231,6 +234,15 @@ export class SandboxLaunchContext {
       });
       return undefined;
     }
+  }
+
+  async loadOpencodePlugins(
+    harness: HarnessId,
+    repositories: SessionRepositoryInfo[]
+  ): Promise<string[] | undefined> {
+    if (harness !== "opencode" || !this.config.opencodePluginLookup) return undefined;
+    // Do not silently change executable configuration when the catalog cannot be read.
+    return this.config.opencodePluginLookup.forSession(repositories);
   }
 
   resolveSandboxSettings(session: SessionRow): ResolvedSandboxSettings {

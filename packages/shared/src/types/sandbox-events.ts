@@ -98,6 +98,13 @@ export const sandboxGenerationSchema = z.object({
 
 const nonArtifactSandboxEventSchemas = [
   sandboxEventBaseSchema.extend({
+    type: z.literal("opencode_plugins"),
+    bootSeq: z.number().int().optional(),
+    plugins: z.array(
+      z.object({ spec: z.string(), status: z.enum(["pending", "loaded", "skipped"]) })
+    ),
+  }),
+  sandboxEventBaseSchema.extend({
     type: z.literal("heartbeat"),
   }),
   sandboxEventBaseSchema.extend({
@@ -220,7 +227,17 @@ const nonArtifactSandboxEventSchemas = [
   // unknown union entries, so this entry must exist before runtimes emit it.
   z.object({
     type: z.literal("warning"),
-    scope: z.enum(["sync", "setup", "start", "assembly", "secrets", "media", "budget", "provider"]),
+    scope: z.enum([
+      "sync",
+      "setup",
+      "start",
+      "assembly",
+      "secrets",
+      "media",
+      "budget",
+      "provider",
+      "plugins",
+    ]),
     message: z.string(),
     repoOwner: z.string().optional(),
     repoName: z.string().optional(),

@@ -168,6 +168,7 @@ export class SessionSandboxEventProcessor {
       case "tool_result":
       case "error":
       case "warning":
+      case "opencode_plugins":
       case "user_message":
         // Timeline-observer events: persist and broadcast, nothing else.
         this.streaming.recordTimelineEvent(event, context);

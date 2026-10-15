@@ -485,6 +485,7 @@ export class SandboxLifecycleManager
       config: {
         model: config.model,
         mcpServerLookup: config.mcpServerLookup,
+        opencodePluginLookup: config.opencodePluginLookup,
         slackAgentNotifyLookup: config.slackAgentNotifyLookup,
       },
       imageBuildLookup,
@@ -844,6 +845,7 @@ export class SandboxLifecycleManager
         vncEnabled,
         agentSlackNotifyEnabled,
         mcpServers,
+        opencodePlugins: await this.launchContext.loadOpencodePlugins(agent.harness, repositories),
         sandboxSettings,
         ...repositoryFields,
       };
@@ -1181,6 +1183,7 @@ export class SandboxLifecycleManager
         vncEnabled,
         agentSlackNotifyEnabled,
         mcpServers,
+        opencodePlugins: await this.launchContext.loadOpencodePlugins(agent.harness, repositories),
         sandboxSettings,
         ...repositoryFields,
       };

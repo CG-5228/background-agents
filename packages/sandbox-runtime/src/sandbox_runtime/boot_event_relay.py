@@ -145,6 +145,12 @@ class BootEventRelay:
                 "status": status,
             }
             event.update({key: line[key] for key in _PHASE_FIELDS if key in line})
+        elif kind == "opencode_plugins":
+            event = {
+                "type": "opencode_plugins",
+                "plugins": line.get("plugins", []),
+                "bootSeq": line["seq"],
+            }
         elif kind == "warning":
             if not line.get("message") or not line.get("scope"):
                 return None
