@@ -17,7 +17,9 @@ CREATE INDEX idx_runs_due_retry ON automation_runs (retry_at) WHERE status = 're
 DROP INDEX idx_runs_active_lookup;
 CREATE INDEX idx_runs_active_lookup ON automation_runs (automation_id, created_at DESC)
   WHERE status IN ('starting', 'running', 'retrying');
-ALTER TABLE automation_runs ADD COLUMN retry_run_id TEXT;
+ALTER TABLE automation_runs ADD COLUMN retry_of_run_id TEXT;
+CREATE UNIQUE INDEX idx_runs_retry_parent ON automation_runs (retry_of_run_id) WHERE retry_of_run_id IS NOT NULL;
+ALTER TABLE automation_runs ADD COLUMN target_resolved INTEGER NOT NULL DEFAULT 1;
 
 ALTER TABLE automation_runs ADD COLUMN retry_withdrawn_at INTEGER;
 ALTER TABLE automation_runs ADD COLUMN completion_publication_claimed_at INTEGER;

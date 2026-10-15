@@ -5,6 +5,7 @@
  * snake_case rows in the database, camelCase types at the API boundary.
  */
 
+import { bindRetryReservations } from "./automation-retries";
 import { isWorkspaceAdmin, WORKSPACE_ADMIN_ROLE_KEYS } from "@open-inspect/shared/rbac";
 import {
   DEFAULT_HARNESS,
@@ -126,6 +127,7 @@ export interface AutomationRunRow {
   retry_at?: number | null;
   superseded_at?: number | null;
   retryable?: number;
+  target_resolved?: number;
   id: string;
   automation_id: string;
   /** Owning invocation. */
@@ -794,10 +796,10 @@ export class AutomationStore {
     return this.db
       .prepare(
         `UPDATE automation_runs
-      SET status = 'failed', retry_at = NULL, retryable = 0, retry_withdrawn_at = ?
+      SET status = 'failed', retry_at = NULL, retryable = 0, retry_withdrawn_at = ?, completed_at = ?
       WHERE automation_id = ? AND status = 'retrying'`
       )
-      .bind(now, id);
+      .bind(now, now, id);
   }
 
   /** Build a soft-delete statement for composition in an atomic batch. */
@@ -1077,13 +1079,16 @@ export class AutomationStore {
 
     params.push(id);
 
-    const result = await this.db
+    const statement = this.db
       .prepare(
         `UPDATE automation_runs SET ${setClauses.join(", ")}
          WHERE id = ? AND status IN ('starting', 'running')`
       )
-      .bind(...params)
-      .run();
+      .bind(...params);
+    const result =
+      fields.status === "failed"
+        ? (await this.db.batch([statement, ...bindRetryReservations(this.db, "r.id = ?", [id])]))[0]
+        : await statement.run();
     return (result.meta?.changes ?? 0) > 0;
   }
 
@@ -1173,14 +1178,17 @@ export class AutomationStore {
   ): Promise<void> {
     if (runIds.length === 0) return;
     const placeholders = runIds.map(() => "?").join(", ");
-    await this.db
+    const statement = this.db
       .prepare(
         `UPDATE automation_runs
          SET status = 'failed', failure_reason = ?, completed_at = ?
          WHERE id IN (${placeholders}) AND status = ?`
       )
-      .bind(reason, completedAt, ...runIds, status)
-      .run();
+      .bind(reason, completedAt, ...runIds, status);
+    await this.db.batch([
+      statement,
+      ...bindRetryReservations(this.db, `r.id IN (${placeholders})`, runIds),
+    ]);
   }
 
   async getActiveRunForAutomation(automationId: string): Promise<AutomationRunRow | null> {
@@ -1312,8 +1320,8 @@ export class AutomationStore {
             `INSERT INTO automation_runs
              (id, automation_id, invocation_id, session_id, status, skip_reason, failure_reason,
               scheduled_at, started_at, completed_at, created_at,
-              repo_owner, repo_name, repo_id, base_branch, environment_id, retryable)
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+              repo_owner, repo_name, repo_id, base_branch, environment_id, retryable, target_resolved)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM automation_invocations WHERE id = ?)`
           )
           .bind(
@@ -1334,9 +1342,14 @@ export class AutomationStore {
             child.base_branch,
             child.environment_id,
             child.retryable ?? 0,
+            child.target_resolved ?? 1,
             invocation.id
           )
       );
+    }
+
+    if (params.children.some((child) => child.status === "failed")) {
+      statements.push(...bindRetryReservations(this.db, "r.invocation_id = ?", [invocation.id]));
     }
 
     if (params.advanceSchedule) {
@@ -1464,6 +1477,13 @@ export class AutomationStore {
       .prepare("UPDATE automation_invocations SET retry_context = ? WHERE id = ?")
       .bind(context, invocationId)
       .run();
+  }
+
+  async getReservedRetry(runId: string): Promise<AutomationRunRow | null> {
+    return this.db
+      .prepare("SELECT * FROM automation_runs WHERE retry_of_run_id = ?")
+      .bind(runId)
+      .first<AutomationRunRow>();
   }
 
   /** One publisher across the retry launcher and a racing session completion callback. */

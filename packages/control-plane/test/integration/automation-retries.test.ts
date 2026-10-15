@@ -1,11 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
-import { AutomationStore } from "../../src/db/automation-store";
+import { AutomationStore, type AutomationRunRow } from "../../src/db/automation-store";
 import {
   AUTOMATION_RETRY_DELAY_MS,
-  claimRetry,
+  claimRetry as claimPendingRetry,
   getDueRetries,
-  scheduleInvocationRetries,
 } from "../../src/db/automation-retries";
 import { Scheduler } from "../../src/scheduler/scheduler";
 import { createCloudflareEnv } from "../../src/cloudflare/platform";
@@ -18,6 +17,14 @@ const retryContext = JSON.stringify({
   platformUserId: "user-1",
   participantUserId: "user-1",
 });
+
+async function claimRetry(db: typeof env.DB, previousId: string, now: number) {
+  const pending = await db
+    .prepare("SELECT * FROM automation_runs WHERE retry_of_run_id = ?")
+    .bind(previousId)
+    .first<AutomationRunRow>();
+  return pending ? claimPendingRetry(db, pending, now) : null;
+}
 
 describe("automation job retries (real D1)", () => {
   beforeEach(async () => {
@@ -53,15 +60,16 @@ describe("automation job retries (real D1)", () => {
 
   it("waits beyond a database stall and reserves the firing while retrying", async () => {
     const store = await seed();
-    await scheduleInvocationRetries(env.DB, "inv");
-    const run = (await store.getRunById("auto", "first"))!;
+    const run = (await store.getRunById("auto", "first:retry"))!;
     expect(run.status).toBe("retrying");
-    expect(run.retry_at).toBe(run.completed_at! + AUTOMATION_RETRY_DELAY_MS);
+    expect(run.retry_at).toBe(
+      (await store.getRunById("auto", "first"))!.completed_at! + AUTOMATION_RETRY_DELAY_MS
+    );
     expect(await getDueRetries(env.DB, run.retry_at! - 1, 25)).toEqual([]);
     expect(await getDueRetries(env.DB, run.retry_at!, 25)).toHaveLength(1);
     expect((await store.getInvocation("auto", "inv"))?.status).toBe("retrying");
     expect((await store.getInvocation("auto", "inv"))?.completedAt).toBeNull();
-    expect((await store.getActiveRunForAutomation("auto"))?.id).toBe("first");
+    expect((await store.getActiveRunForAutomation("auto"))?.id).toBe("first:retry");
     expect(
       await store.insertInvocationGuarded({
         invocation: makeInvocation("auto", { id: "duplicate" }),
@@ -84,16 +92,16 @@ describe("automation job retries (real D1)", () => {
         ...(target === "environment" ? { environment_id: "env_original" } : {}),
       });
       const store = await seed(2, [first]);
-      await scheduleInvocationRetries(env.DB, "inv");
-      const due = (await store.getRunById("auto", "first"))!.retry_at!;
+      const due = (await store.getRunById("auto", "first:retry"))!.retry_at!;
       const claimed = await Promise.all([
-        claimRetry(env.DB, "first", "second-a", due),
-        claimRetry(env.DB, "first", "second-b", due),
+        claimRetry(env.DB, "first", due),
+        claimRetry(env.DB, "first", due),
       ]);
       const winners = claimed.filter((run) => run !== null);
       expect(winners).toHaveLength(1);
       expect(winners[0]).toMatchObject({
         attempt: 2,
+        created_at: due,
         status: "starting",
         invocation_id: "inv",
         repo_owner: first.repo_owner,
@@ -102,11 +110,18 @@ describe("automation job retries (real D1)", () => {
         environment_id: first.environment_id,
         scheduled_at: first.scheduled_at,
       });
+      expect(
+        (
+          await env.DB.prepare(AutomationStore.ORPHANED_STARTING_RUNS_SQL)
+            .bind(due - 1)
+            .all()
+        ).results
+      ).toEqual([]);
       const history = (await store.getInvocation("auto", "inv"))!;
       expect(history.runs).toHaveLength(2);
       expect(history.runs.find((run) => run.id === "first")).toMatchObject({
         status: "failed",
-        supersededAt: due,
+        supersededAt: first.completed_at,
       });
       expect((await store.getInvocationRunAggregate("inv")).total).toBe(1);
     }
@@ -114,30 +129,30 @@ describe("automation job retries (real D1)", () => {
 
   it("backs off, exhausts its budget, and preserves the last failure", async () => {
     const store = await seed(1);
-    await scheduleInvocationRetries(env.DB, "inv");
-    const due = (await store.getRunById("auto", "first"))!.retry_at!;
-    const retry = (await claimRetry(env.DB, "first", "second", due))!;
+    const due = (await store.getRunById("auto", "first:retry"))!.retry_at!;
+    const retry = (await claimRetry(env.DB, "first", due))!;
     await store.updateRun(retry.id, {
       status: "failed",
       completed_at: due + 1,
       failure_reason: "Final failure",
       retryable: 1,
     });
-    await scheduleInvocationRetries(env.DB, "inv");
     expect(await getDueRetries(env.DB, due + 10 * AUTOMATION_RETRY_DELAY_MS, 25)).toEqual([]);
     expect((await store.getInvocation("auto", "inv"))?.status).toBe("failed");
-    expect((await store.getRunById("auto", "second"))?.failure_reason).toBe("Final failure");
+    expect((await store.getRunById("auto", "first:retry"))?.failure_reason).toBe("Final failure");
     expect(await store.getInvocationRunAggregate("inv")).toMatchObject({ total: 1, failed: 1 });
   });
 
   it("doubles the delay after each failed retry", async () => {
     const store = await seed(2);
-    await scheduleInvocationRetries(env.DB, "inv");
-    const due = (await store.getRunById("auto", "first"))!.retry_at!;
-    await claimRetry(env.DB, "first", "second", due);
-    await store.updateRun("second", { status: "failed", completed_at: due + 10, retryable: 1 });
-    await scheduleInvocationRetries(env.DB, "inv");
-    expect((await store.getRunById("auto", "second"))?.retry_at).toBe(
+    const due = (await store.getRunById("auto", "first:retry"))!.retry_at!;
+    await claimRetry(env.DB, "first", due);
+    await store.updateRun("first:retry", {
+      status: "failed",
+      completed_at: due + 10,
+      retryable: 1,
+    });
+    expect((await store.getRunById("auto", "first:retry:retry"))?.retry_at).toBe(
       due + 10 + 2 * AUTOMATION_RETRY_DELAY_MS
     );
   });
@@ -159,10 +174,9 @@ describe("automation job retries (real D1)", () => {
         repo_name: "b",
       }),
     ]);
-    await scheduleInvocationRetries(env.DB, "inv");
-    const due = (await store.getRunById("auto", "first"))!.retry_at!;
-    await claimRetry(env.DB, "first", "second", due);
-    await store.updateRun("second", { status: "completed", completed_at: due + 1 });
+    const due = (await store.getRunById("auto", "first:retry"))!.retry_at!;
+    await claimRetry(env.DB, "first", due);
+    await store.updateRun("first:retry", { status: "completed", completed_at: due + 1 });
     expect((await store.getInvocation("auto", "inv"))?.status).toBe("completed");
     expect(
       (await store.listInvocations("auto", { limit: 10, offset: 0 })).invocations[0]?.status
@@ -206,12 +220,10 @@ describe("automation job retries (real D1)", () => {
       "INSERT INTO sessions (id, status, created_at, updated_at) VALUES ('old-session', 'active', 1, 1)"
     ).run();
     await store.updateRun("first", { status: "failed", completed_at: Date.now(), retryable: 1 });
-    await scheduleInvocationRetries(env.DB, "inv");
     await env.DB.prepare("UPDATE sessions SET status = 'cancelled' WHERE id = 'old-session'").run();
-    const due = (await store.getRunById("auto", "first"))!.retry_at!;
-    expect(await claimRetry(env.DB, "first", "second", due)).toBeNull();
+    const due = (await store.getRunById("auto", "first:retry"))!.retry_at!;
+    expect(await claimRetry(env.DB, "first", due)).toBeNull();
     expect(await getDueRetries(env.DB, due, 25)).toEqual([]);
-    await scheduleInvocationRetries(env.DB, "inv");
     expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
   });
 
@@ -228,13 +240,13 @@ describe("automation job retries (real D1)", () => {
       messageId: "one",
       success: false,
     });
-    const due = (await store.getRunById("auto", "first"))!.retry_at!;
-    await claimRetry(env.DB, "first", "second", due);
-    await store.claimRunSession("second", "new-session", due, due + 60_000);
+    const due = (await store.getRunById("auto", "first:retry"))!.retry_at!;
+    await claimRetry(env.DB, "first", due);
+    await store.claimRunSession("first:retry", "new-session", due, due + 60_000);
     for (let i = 0; i < 2; i++) {
       await scheduler.runComplete({
         automationId: "auto",
-        runId: "second",
+        runId: "first:retry",
         sessionId: "new-session",
         messageId: "two",
         success: false,
@@ -243,7 +255,7 @@ describe("automation job retries (real D1)", () => {
     }
     expect(await store.getById("auto")).toMatchObject({ consecutive_failures: 3, enabled: 0 });
     expect(await store.getInvocation("auto", "inv")).toMatchObject({ status: "failed" });
-    expect((await store.getRunById("auto", "second"))?.failure_reason).toBe("Last failure");
+    expect((await store.getRunById("auto", "first:retry"))?.failure_reason).toBe("Last failure");
   });
 
   it("leaves ambiguous execution timeouts failed to avoid concurrent executions", async () => {
@@ -256,7 +268,6 @@ describe("automation job retries (real D1)", () => {
         session_id: "possibly-running",
       }),
     ]);
-    await scheduleInvocationRetries(env.DB, "inv");
     expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
   });
 
@@ -264,13 +275,10 @@ describe("automation job retries (real D1)", () => {
     "withdraws pending retries on %s",
     async (change) => {
       const store = await seed();
-      await scheduleInvocationRetries(env.DB, "inv");
       if (change === "pause") await store.pause("auto");
       if (change === "delete") await store.softDelete("auto");
       if (change === "disable retries") await store.update("auto", { max_retries: 0 });
-      expect(
-        await claimRetry(env.DB, "first", "second", Date.now() + AUTOMATION_RETRY_DELAY_MS)
-      ).toBeNull();
+      expect(await claimRetry(env.DB, "first", Date.now() + AUTOMATION_RETRY_DELAY_MS)).toBeNull();
       expect(await getDueRetries(env.DB, Date.now() + AUTOMATION_RETRY_DELAY_MS, 25)).toEqual([]);
       expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
     }
@@ -309,11 +317,12 @@ describe("automation job retries (real D1)", () => {
       success: false,
       error: "Transient failure",
     });
-    expect((await store.getRunById("auto", "first"))?.status).toBe("retrying");
+    expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
+    expect((await store.getRunById("auto", "first:retry"))?.status).toBe("retrying");
     expect((await store.getById("auto"))?.consecutive_failures).toBe(2);
     expect((await store.getById("auto"))?.enabled).toBe(1);
     // Advance the persisted deadline rather than sleeping or faking D1's clock.
-    await env.DB.prepare("UPDATE automation_runs SET retry_at = ? WHERE id = 'first'")
+    await env.DB.prepare("UPDATE automation_runs SET retry_at = ? WHERE status = 'retrying'")
       .bind(Date.now() - 1)
       .run();
     await Promise.all([scheduler().tick(), scheduler().tick()]);
@@ -321,6 +330,7 @@ describe("automation job retries (real D1)", () => {
     expect(invocation.runs).toHaveLength(2);
     const retry = invocation.runs.find((run) => run.attempt === 2)!;
     expect(retry.status).toBe("running");
+    expect(retry.failureReason).toBeNull();
     const prompts = sessionFetch.mock.calls.filter(
       ([request]) => new URL(request.url).pathname === "/internal/prompt"
     );
@@ -365,7 +375,7 @@ describe("automation job retries (real D1)", () => {
     expect(result.runs).toHaveLength(1);
     expect(result.runs[0]).toMatchObject({
       status: "retrying",
-      attempt: 1,
+      attempt: 2,
       retryAt: expect.any(Number),
     });
     expect((await store.getById("auto"))?.consecutive_failures).toBe(0);
@@ -373,8 +383,7 @@ describe("automation job retries (real D1)", () => {
 
   it("rechecks the original execution user's authorization before launching a retry", async () => {
     const store = await seed();
-    await scheduleInvocationRetries(env.DB, "inv");
-    await env.DB.prepare("UPDATE automation_runs SET retry_at = ? WHERE id = 'first'")
+    await env.DB.prepare("UPDATE automation_runs SET retry_at = ? WHERE status = 'retrying'")
       .bind(Date.now() - 1)
       .run();
     await env.DB.prepare("DELETE FROM user_role_assignments WHERE user_id = 'user-1'").run();
@@ -396,7 +405,6 @@ describe("automation job retries (real D1)", () => {
 
   it("defaults existing jobs to no retries", async () => {
     const store = await seed(0);
-    await scheduleInvocationRetries(env.DB, "inv");
     expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
   });
 });

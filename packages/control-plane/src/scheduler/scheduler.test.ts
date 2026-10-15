@@ -24,7 +24,6 @@ import type * as SessionAdmissionModule from "../authorization/session-admission
 
 vi.mock("../db/automation-retries", async (importOriginal) => ({
   ...(await importOriginal<typeof AutomationRetries>()),
-  scheduleInvocationRetries: vi.fn().mockResolvedValue(undefined),
   getDueRetries: vi.fn().mockResolvedValue([]),
   claimRetry: vi.fn().mockResolvedValue(null),
 }));

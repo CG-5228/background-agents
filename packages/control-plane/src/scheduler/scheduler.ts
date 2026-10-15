@@ -55,12 +55,7 @@ import {
   AutomationModelProviderAuthStore,
   toProviderSelections,
 } from "../db/automation-model-provider-auth";
-import {
-  automationRetryContextSchema,
-  scheduleInvocationRetries,
-  getDueRetries,
-  claimRetry,
-} from "../db/automation-retries";
+import { automationRetryContextSchema, getDueRetries, claimRetry } from "../db/automation-retries";
 import { SlackChannelStore } from "../db/slack-channel-store";
 import { SessionIndexStore } from "../db/session-index";
 import { TeamChannelBindingStore } from "../db/team-channel-bindings";
@@ -76,7 +71,11 @@ import { getUserAuth } from "../auth/user/runtime";
 import { GitHubAttributionUnavailableError } from "../source-control/github-credential-authority";
 import { UserStore } from "../db/user-store";
 import { TeamStore } from "../db/teams";
-import { TeamRepositoryGrantStore } from "../db/team-repository-grants";
+import {
+  prepareAutomationTargetAdmission,
+  type LaunchTargetSnapshot,
+} from "../automation/target-admission";
+export { AutomationExecutionUnauthorizedError } from "../automation/authorization-guard";
 import { createRequestMetrics } from "../db/instrumented-sql-database";
 import { generateId, hashToken } from "../auth/crypto";
 import { createLogger, parseLogLevel } from "../logger";
@@ -101,6 +100,7 @@ import {
   type AutomationSessionTarget,
 } from "../automation/session-target";
 import {
+  AutomationExecutionUnauthorizedError,
   isAutomationExecutionAuthorized,
   type AutomationExecutionAuthorizationRequest,
 } from "../automation/authorization-guard";
@@ -274,15 +274,6 @@ export class AutomationTriggerBlockedError extends Error {
   }
 }
 
-/** Raised when an automation's execution principal lacks required authorization. */
-export class AutomationExecutionUnauthorizedError extends Error {
-  /** Create an error for an unauthorized automation execution principal. */
-  constructor(readonly reason = "execution_authorization_denied") {
-    super("Automation execution principal is not authorized");
-    this.name = "AutomationExecutionUnauthorizedError";
-  }
-}
-
 /**
  * Raised when the session a webhook sessionKey continues does not take the follow-up.
  * The sender sees the refusal instead of the delivery starting over in a fresh session.
@@ -392,19 +383,6 @@ interface LaunchAdmission {
 }
 
 /** Coordinates authorized automation scheduling, dispatch, and completion handling. */
-/** A launch candidate's target as resolved at admission, or why it could not be resolved. */
-type LaunchTargetSnapshot = { target: AutomationSessionTarget } | { error: unknown };
-
-/** Repository IDs that the resolved launch targets will open. */
-function launchTargetRepoIds(snapshots: ReadonlyMap<string, LaunchTargetSnapshot>): number[] {
-  return [...snapshots.values()].flatMap((snapshot) => {
-    if (!("target" in snapshot)) return [];
-    const { target } = snapshot;
-    if (target.repositories) return target.repositories.map((repository) => repository.repoId);
-    return target.repoId === null ? [] : [target.repoId];
-  });
-}
-
 export class Scheduler {
   private readonly log: Logger;
 
@@ -448,7 +426,6 @@ export class Scheduler {
     automationId: string,
     invocationId: string
   ): Promise<void> {
-    await scheduleInvocationRetries(this.db, invocationId);
     const aggregate = await store.getInvocationRunAggregate(invocationId);
     if (aggregate.total === 0) return; // childless skip — never counts
 
@@ -521,11 +498,6 @@ export class Scheduler {
       params.repositories ?? store.getRepositoriesForAutomation(automation.id),
       params.environments ?? store.getEnvironmentsForAutomation(automation.id),
     ]);
-    // One snapshot of the owning team classifies denials and pins the grants version.
-    const team =
-      automation.owner_team_id === null
-        ? null
-        : await new TeamStore(this.db).getById(automation.owner_team_id);
     const authorization: AutomationExecutionAuthorizationRequest = {
       automationId: automation.id,
       executionUserId: executionPrincipal.platformUserId,
@@ -533,19 +505,13 @@ export class Scheduler {
       requiresEnvironmentUse: environmentSelection.length > 0,
     };
     if (!(await isAutomationExecutionAuthorized(this.db, authorization))) {
+      const team =
+        automation.owner_team_id === null
+          ? null
+          : await new TeamStore(this.db).getById(automation.owner_team_id);
       return { outcome: "unauthorized", reason: executionDenialReason(team) };
     }
-    const resolutions = await resolveAutomationRepositories(this.env, selection);
-    for (const resolution of resolutions) {
-      if (
-        params.eventRepositoryId !== undefined &&
-        resolution.repository !== null &&
-        resolution.repository.repoId !== params.eventRepositoryId
-      ) {
-        resolution.repository = null;
-        resolution.error = "Repository identity changed during event resolution";
-      }
-    }
+    const resolutions = await this.resolveRepositoryRequests(selection, params.eventRepositoryId);
 
     const invocationId = params.invocationId ?? generateId();
     const scheduledAt = params.scheduledAt ?? now;
@@ -584,6 +550,7 @@ export class Scheduler {
         status: resolution.error ? "failed" : "starting",
         failure_reason: resolution.error,
         completed_at: resolution.error ? now : null,
+        target_resolved: resolution.error ? 0 : 1,
         repo_owner: resolution.repository?.repoOwner ?? resolution.requested.repo_owner,
         repo_name: resolution.repository?.repoName ?? resolution.requested.repo_name,
         repo_id: resolution.repository?.repoId ?? resolution.requested.repo_id,
@@ -600,22 +567,21 @@ export class Scheduler {
     }
 
     const launchCandidates = children.filter((child) => child.status === "starting");
-    let launchTargets: ReadonlyMap<string, LaunchTargetSnapshot> = new Map();
+    let launchTargets: ReadonlyMap<string, LaunchTargetSnapshot>;
     let teamGrantsVersion: { teamId: string; version: number } | undefined;
-    if (automation.owner_team_id !== null) {
-      if (!team) return { outcome: "unauthorized", reason: "execution_authorization_denied" };
-      // Snapshot the grants version before checking coverage; the guarded insert
-      // refuses admission if grants change in between.
-      teamGrantsVersion = { teamId: team.id, version: team.grantsVersion };
-      launchTargets = await this.resolveLaunchTargets(automation, launchCandidates);
-      if (
-        !(await new TeamRepositoryGrantStore(this.db).covers(
-          team.id,
-          launchTargetRepoIds(launchTargets)
-        ))
-      ) {
-        return { outcome: "unauthorized", reason: "target_team_missing_grant" };
-      }
+    try {
+      ({ targets: launchTargets, teamGrantsVersion } = await prepareAutomationTargetAdmission(
+        this.db,
+        this.env,
+        automation,
+        launchCandidates,
+        this.backgroundJobs,
+        this.log
+      ));
+    } catch (error) {
+      if (error instanceof AutomationExecutionUnauthorizedError)
+        return { outcome: "unauthorized", reason: error.reason };
+      throw error;
     }
     // Resolve provider routing before admission, alongside the already-built
     // target children. Together these values are the immutable launch snapshot
@@ -644,6 +610,7 @@ export class Scheduler {
         instructions: params.instructionsOverride ?? automation.instructions,
         platformUserId: executionPrincipal.platformUserId,
         participantUserId: executionPrincipal.participantUserId,
+        eventRepositoryId: params.eventRepositoryId,
       }),
       id: invocationId,
       automation_id: automation.id,
@@ -766,6 +733,7 @@ export class Scheduler {
             instructions: instructionsOverride ?? automation.instructions,
             platformUserId: executionPrincipal.platformUserId,
             participantUserId: executionPrincipal.participantUserId,
+            eventRepositoryId: params.eventRepositoryId,
           })
         );
       } catch (error) {
@@ -806,7 +774,9 @@ export class Scheduler {
         await this.applyInvocationAccounting(store, automation.id, invocationId);
         if ((automation.max_retries ?? 0) > 0) {
           for (const child of children.filter((run) => run.status === "failed")) {
-            const updated = await store.getRunById(automation.id, child.id);
+            const updated =
+              (await store.getReservedRetry(child.id)) ??
+              (await store.getRunById(automation.id, child.id));
             if (updated) Object.assign(child, updated);
           }
         }
@@ -932,15 +902,8 @@ export class Scheduler {
       const context = automationRetryContextSchema.parse(
         JSON.parse(invocation.retry_context ?? "null")
       );
-      const child = await claimRetry(this.db, previous.id, generateId(), now);
-      if (!child) continue;
-      this.log.info("Launching automation retry", {
-        event: "scheduler.retry",
-        automation_id: automation.id,
-        invocation_id: child.invocation_id,
-        run_id: child.id,
-        attempt: child.attempt,
-      });
+      let child = previous;
+      let claimed = false;
       const authorization: AutomationExecutionAuthorizationRequest = {
         automationId: automation.id,
         executionUserId: context.platformUserId,
@@ -967,24 +930,60 @@ export class Scheduler {
           },
           Object.fromEntries(providerAuth.map((auth) => [auth.provider, auth.authMode]))
         );
-        const target = await this.resolveLaunchTargets(automation, [child]);
-        if (
-          automation.owner_team_id !== null &&
-          !(await new TeamRepositoryGrantStore(this.db).covers(
-            automation.owner_team_id,
-            launchTargetRepoIds(target)
-          ))
-        ) {
-          throw new AutomationExecutionUnauthorizedError("target_team_missing_grant");
+        if (child.target_resolved === 0) {
+          const [resolution] = await this.resolveRepositoryRequests(
+            [
+              {
+                repo_owner: child.repo_owner!,
+                repo_name: child.repo_name!,
+                repo_id: child.repo_id,
+                base_branch: child.base_branch,
+              },
+            ],
+            context.eventRepositoryId
+          );
+          if (!resolution.repository)
+            throw new Error(resolution.error ?? "Repository resolution failed");
+          Object.assign(child, {
+            repo_owner: resolution.repository.repoOwner,
+            repo_name: resolution.repository.repoName,
+            repo_id: resolution.repository.repoId,
+            base_branch: resolution.repository.baseBranch,
+            target_resolved: 1,
+          });
         }
+        const admission = await prepareAutomationTargetAdmission(
+          this.db,
+          this.env,
+          automation,
+          [child],
+          this.backgroundJobs,
+          this.log
+        );
+        const admitted = await claimRetry(this.db, child, now, admission.teamGrantsVersion);
+        if (!admitted) continue;
+        child = admitted;
+        claimed = true;
+        this.log.info("Launching automation retry", {
+          event: "scheduler.retry",
+          automation_id: automation.id,
+          invocation_id: child.invocation_id,
+          run_id: child.id,
+          attempt: child.attempt,
+        });
         await this.launchChild(store, automation, child, {
           executionPrincipal: principal,
           authorization,
           providerAuthSnapshot: { providerAuth },
-          targetSnapshot: target.get(child.id),
+          targetSnapshot: admission.targets.get(child.id),
           instructionsOverride: context.instructions,
         });
       } catch (error) {
+        if (!claimed) {
+          const admitted = await claimRetry(this.db, previous, now);
+          if (!admitted) continue;
+          child = admitted;
+        }
         await store.updateRun(child.id, {
           status: error instanceof AutomationExecutionUnauthorizedError ? "unauthorized" : "failed",
           completed_at: Date.now(),
@@ -1845,7 +1844,7 @@ export class Scheduler {
     }
 
     const updatedRun = await store.getRunById(body.automationId, body.runId);
-    if (updatedRun?.status === "retrying") return;
+    if (updatedRun?.superseded_at != null || updatedRun?.status === "retrying") return;
 
     if (body.success) {
       this.log.info("Run completed successfully", {
@@ -2077,37 +2076,22 @@ export class Scheduler {
     return resolveExecutionBudgetMs(sandboxSettings, this.env) + EXECUTION_DEADLINE_GRACE_MS;
   }
 
-  /**
-   * Resolve each launch candidate's session target once, at admission, so grant coverage is
-   * checked against exactly what launch will open. Resolution errors become launch failures.
-   */
-  private async resolveLaunchTargets(
-    automation: AutomationRow,
-    candidates: readonly AutomationRunRow[]
-  ): Promise<ReadonlyMap<string, LaunchTargetSnapshot>> {
-    const snapshots = new Map<string, LaunchTargetSnapshot>();
-    await Promise.all(
-      candidates.map(async (child) => {
-        try {
-          const target = await resolveAutomationSessionTarget(
-            this.env,
-            child,
-            {
-              trace_id: `automation:${automation.id}`,
-              request_id: child.id,
-              metrics: createRequestMetrics(),
-              db: this.db,
-              executionCtx: this.backgroundJobs,
-            },
-            this.log
-          );
-          snapshots.set(child.id, { target });
-        } catch (error) {
-          snapshots.set(child.id, { error });
-        }
-      })
-    );
-    return snapshots;
+  private async resolveRepositoryRequests(
+    selection: AutomationRepositoryInsert[],
+    eventRepositoryId?: number
+  ) {
+    const resolutions = await resolveAutomationRepositories(this.env, selection);
+    for (const resolution of resolutions) {
+      if (
+        eventRepositoryId !== undefined &&
+        resolution.repository &&
+        resolution.repository.repoId !== eventRepositoryId
+      ) {
+        resolution.repository = null;
+        resolution.error = "Repository identity changed during event resolution";
+      }
+    }
+    return resolutions;
   }
 
   private async createSessionForAutomationRun(

@@ -604,9 +604,11 @@ has its own run and session, while retaining the original invocation, target, pr
 user. Current authorization and provider settings are checked again at launch.
 
 Run history exposes `attempt`, `retryAt`, and `supersededAt`, and reports `retrying` while waiting.
-Superseded attempts retain their failures but do not affect the invocation's final status. Failure
-streaks and auto-pause account for the final result after retries, rather than each attempt.
-Pausing/deleting the automation or disabling retries withdraws pending retries. Explicitly cancelled
-executions are not retried. Recovery timeouts and ambiguous prompt delivery failures remain failed
-because the original execution might still be running. A fresh attempt can repeat side effects
-performed before a confirmed failure, so enable retries only for jobs that tolerate that repetition.
+Recording a retryable failure atomically reserves its next pending attempt, keeping the firing's
+concurrency slot occupied throughout backoff. Completed attempts retain their terminal results;
+superseded attempts do not affect the invocation's final status. Failure streaks and auto-pause
+account for the final result after retries, rather than each attempt. Pausing/deleting the
+automation or disabling retries withdraws pending retries. Explicitly cancelled executions are not
+retried. Execution timeouts and ambiguous prompt delivery failures remain failed because the
+original execution might still be running. A fresh attempt can repeat side effects performed before
+a confirmed failure, so enable retries only for jobs that tolerate that repetition.

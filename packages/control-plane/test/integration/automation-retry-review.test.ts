@@ -1,11 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
-import { AutomationStore } from "../../src/db/automation-store";
-import {
-  claimRetry,
-  getDueRetries,
-  scheduleInvocationRetries,
-} from "../../src/db/automation-retries";
+import { AutomationStore, type AutomationRunRow } from "../../src/db/automation-store";
+import { claimRetry as claimPendingRetry, getDueRetries } from "../../src/db/automation-retries";
 import { Scheduler } from "../../src/scheduler/scheduler";
 import { createCloudflareEnv } from "../../src/cloudflare/platform";
 import {
@@ -18,6 +14,7 @@ import {
 import { createLogger } from "../../src/logger";
 import * as harnessAdmission from "../../src/harness-admission";
 import { createRequestMetrics } from "../../src/db/instrumented-sql-database";
+import * as repositories from "../../src/automation/repository";
 import * as targets from "../../src/automation/session-target";
 import { cleanD1Tables } from "./cleanup";
 import { seedActiveUser } from "./helpers";
@@ -43,7 +40,6 @@ async function seedPendingRetry() {
     children: [makeChild("auto", { id: "first", status: "failed", completed_at: Date.now() })],
     overlapScope: { kind: "automation" },
   });
-  await scheduleInvocationRetries(env.DB, "inv");
   return store;
 }
 
@@ -65,12 +61,229 @@ async function makeDue() {
   await env.DB.prepare("UPDATE automation_runs SET retry_at = 0 WHERE status = 'retrying'").run();
 }
 
+async function claimRetry(db: typeof env.DB, previousId: string, now: number) {
+  const pending = await db
+    .prepare("SELECT * FROM automation_runs WHERE retry_of_run_id = ?")
+    .bind(previousId)
+    .first<AutomationRunRow>();
+  return pending ? claimPendingRetry(db, pending, now) : null;
+}
+
 describe("automation retry review regressions (real D1)", () => {
   beforeEach(async () => {
     await cleanD1Tables();
     await seedActiveUser("user-1");
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it.each(["recovery", "admission"])(
+    "reserves a pending attempt atomically with %s failure",
+    async (path) => {
+      const store = new AutomationStore(env.DB);
+      await store.create(makeAutomation({ id: "auto", max_retries: 1 }));
+      await store.insertInvocationGuarded({
+        invocation: makeInvocation("auto", { id: "inv", retry_context: context }),
+        children: [
+          makeChild("auto", {
+            id: "first",
+            status: path === "admission" ? "failed" : "starting",
+            completed_at: path === "admission" ? Date.now() : null,
+          }),
+        ],
+        overlapScope: { kind: "automation" },
+      });
+      if (path === "recovery")
+        await store.bulkFailStartingRuns(["first"], "session_creation_timeout", Date.now());
+      // No accounting/scheduler call may be required to retain the overlap reservation.
+      expect(
+        await store.insertInvocationGuarded({
+          invocation: makeInvocation("auto", { id: "competitor" }),
+          children: [makeChild("auto")],
+          overlapScope: { kind: "automation" },
+        })
+      ).toEqual({ inserted: false });
+      expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
+      expect((await store.getActiveRunForAutomation("auto"))?.status).toBe("retrying");
+    }
+  );
+
+  it.each(["callback", "launch"])(
+    "retains overlap through the %s failure/accounting boundary",
+    async (path) => {
+      const store = new AutomationStore(env.DB);
+      await store.create(makeAutomation({ id: "auto", max_retries: 1 }));
+      if (path === "callback")
+        await store.insertInvocationGuarded({
+          invocation: makeInvocation("auto", { id: "inv", retry_context: context }),
+          children: [
+            makeChild("auto", { id: "first", status: "running", session_id: "old-session" }),
+          ],
+          overlapScope: { kind: "automation" },
+        });
+      let competing: { inserted: boolean } | undefined;
+      const updateRun = AutomationStore.prototype.updateRun;
+      vi.spyOn(AutomationStore.prototype, "updateRun").mockImplementationOnce(async function (
+        this: AutomationStore,
+        id,
+        fields
+      ) {
+        const transitioned = await updateRun.call(this, id, fields);
+        competing = await this.insertInvocationGuarded({
+          invocation: makeInvocation("auto", { id: "competitor" }),
+          children: [makeChild("auto")],
+          overlapScope: { kind: "automation" },
+        });
+        return transitioned;
+      });
+      const scheduler = new Scheduler(env.DB, schedulerEnv(), { submit() {} });
+      if (path === "callback")
+        await scheduler.runComplete({
+          automationId: "auto",
+          runId: "first",
+          sessionId: "old-session",
+          messageId: "original",
+          success: false,
+          error: "Transient failure",
+        });
+      else await scheduler.trigger("auto", "user-1");
+      expect(competing).toEqual({ inserted: false });
+      expect((await store.getActiveRunForAutomation("auto"))?.status).toBe("retrying");
+    }
+  );
+
+  it("refuses retry admission when grants change after the coverage check", async () => {
+    const store = await seedPendingRetry();
+    await seedTeam("team-retry", [["user-1", "lead"]]);
+    await env.DB.prepare(
+      "UPDATE automations SET owner_team_id = 'team-retry' WHERE id = 'auto'"
+    ).run();
+    await env.DB.prepare(
+      "UPDATE automation_runs SET repo_owner = 'acme', repo_name = 'app', repo_id = 42 WHERE status = 'retrying'"
+    ).run();
+    await seedGrant("team-retry", { repo_id: 42, repo_owner: "acme", repo_name: "app" });
+    const grants = new TeamRepositoryGrantStore(env.DB);
+    const [grant] = await grants.listDetailsForTeam("team-retry");
+    const covers = TeamRepositoryGrantStore.prototype.covers;
+    vi.spyOn(TeamRepositoryGrantStore.prototype, "covers").mockImplementationOnce(async function (
+      this: TeamRepositoryGrantStore,
+      teamId,
+      repoIds
+    ) {
+      const covered = await covers.call(this, teamId, repoIds);
+      await grants.remove(teamId, grant.id);
+      return covered;
+    });
+    await makeDue();
+    const sessionFetch = vi.fn(async (_request: Request) => Response.json({ status: "ok" }));
+    await new Scheduler(env.DB, schedulerEnv(sessionFetch), { submit() {} }).tick();
+    expect(sessionFetch).not.toHaveBeenCalled();
+    expect((await store.getActiveRunForAutomation("auto"))?.status).toBe("retrying");
+    await new Scheduler(env.DB, schedulerEnv(sessionFetch), { submit() {} }).tick();
+    expect(
+      (await store.getInvocation("auto", "inv"))!.runs.find((run) => run.attempt === 2)
+    ).toMatchObject({ status: "unauthorized", failureReason: "target_team_missing_grant" });
+    expect(sessionFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([null, 42])(
+    "resolves failed repository requests again (requested id: %s)",
+    async (repoId) => {
+      const store = new AutomationStore(env.DB);
+      await store.create(makeAutomation({ id: "auto", max_retries: 1 }));
+      const requested = {
+        repo_owner: "acme",
+        repo_name: "app",
+        repo_id: repoId,
+        base_branch: null,
+      };
+      await store.replaceRepositories("auto", [requested]);
+      const resolve = vi
+        .spyOn(repositories, "resolveAutomationRepositories")
+        .mockResolvedValueOnce([{ requested, repository: null, error: "SCM unavailable" }])
+        .mockResolvedValue([
+          {
+            requested,
+            repository: { repoOwner: "acme", repoName: "app", repoId: 42, baseBranch: "main" },
+            error: null,
+          },
+        ]);
+      const sessionFetch = vi.fn(async (request: Request) =>
+        Response.json(
+          new URL(request.url).pathname === "/internal/init"
+            ? { status: "ok" }
+            : { status: "queued", messageId: "retry-prompt" }
+        )
+      );
+      const scheduler = new Scheduler(env.DB, schedulerEnv(sessionFetch), { submit() {} });
+      const admitted = await scheduler.trigger("auto", "user-1");
+      await makeDue();
+      await scheduler.tick();
+      const invocation = (await store.getInvocation("auto", admitted.invocationId))!;
+      expect(resolve).toHaveBeenCalledTimes(2);
+      expect(invocation.runs.find((run) => run.attempt === 2)).toMatchObject({
+        status: "running",
+        repoId: 42,
+      });
+      expect(sessionFetch).toHaveBeenCalled();
+    }
+  );
+
+  it("retains the GitHub event repository identity through unresolved-request retries", async () => {
+    const store = new AutomationStore(env.DB);
+    await seedTeam("team-event", [["user-1", "lead"]]);
+    await seedGrant("team-event", { repo_id: 42, repo_owner: "acme", repo_name: "app" });
+    await store.create(
+      makeAutomation({
+        id: "auto",
+        max_retries: 1,
+        owner_team_id: "team-event",
+        trigger_type: "github_event",
+        event_type: "pull_request.opened",
+        trigger_config: JSON.stringify({ conditions: [] }),
+      })
+    );
+    const requested = { repo_owner: "acme", repo_name: "app", repo_id: 42, base_branch: null };
+    await store.replaceRepositories("auto", [requested]);
+    vi.spyOn(repositories, "resolveAutomationRepositories")
+      .mockResolvedValueOnce([{ requested, repository: null, error: "SCM unavailable" }])
+      .mockResolvedValue([
+        {
+          requested,
+          repository: { repoOwner: "acme", repoName: "app", repoId: 99, baseBranch: "main" },
+          error: null,
+        },
+      ]);
+    const sessionFetch = vi.fn(async (_request: Request) => Response.json({ status: "ok" }));
+    const scheduler = new Scheduler(env.DB, schedulerEnv(sessionFetch), { submit() {} });
+    const result = await scheduler.event({
+      source: "github",
+      repositoryId: 42,
+      repoOwner: "acme",
+      repoName: "app",
+      eventType: "pull_request.opened",
+      triggerKey: "event",
+      concurrencyKey: "pr:1",
+      contextBlock: "Review",
+      meta: {},
+      branch: "feature",
+      targetBranch: "main",
+      pullRequest: { number: 1, state: "open", draft: false },
+    });
+    expect(result.invocationIds).toHaveLength(1);
+    expect(
+      JSON.parse((await store.getInvocationById(result.invocationIds[0]))!.retry_context!)
+    ).toHaveProperty("eventRepositoryId", 42);
+    await makeDue();
+    await scheduler.tick();
+    expect(sessionFetch).not.toHaveBeenCalled();
+    const retry = (await store.getInvocation("auto", result.invocationIds[0]))!.runs.find(
+      (run) => run.attempt === 2
+    );
+    expect(retry).toMatchObject({
+      status: "failed",
+      failureReason: "Repository identity changed during event resolution",
+    });
+  });
 
   it.each([false, true])(
     "pause/resume permanently withdraws sessionless retries (tick during pause: %s)",
@@ -79,9 +292,8 @@ describe("automation retry review regressions (real D1)", () => {
       await store.pause("auto");
       if (tick) await getDueRetries(env.DB, Date.now() + 120_000, 25);
       await store.resume("auto", Date.now() + 86400_000);
-      await scheduleInvocationRetries(env.DB, "inv");
       expect(await getDueRetries(env.DB, Date.now() + 120_000, 25)).toEqual([]);
-      expect(await claimRetry(env.DB, "first", "second", Date.now() + 120_000)).toBeNull();
+      expect(await claimRetry(env.DB, "first", Date.now() + 120_000)).toBeNull();
       expect((await store.getRunById("auto", "first"))?.status).toBe("failed");
     }
   );
@@ -90,7 +302,6 @@ describe("automation retry review regressions (real D1)", () => {
     const store = await seedPendingRetry();
     await store.update("auto", { max_retries: 0 });
     await store.update("auto", { max_retries: 1 });
-    await scheduleInvocationRetries(env.DB, "inv");
     expect(await getDueRetries(env.DB, Date.now() + 120_000, 25)).toEqual([]);
   });
 
@@ -104,7 +315,7 @@ describe("automation retry review regressions (real D1)", () => {
       ).run();
       await seedGrant("team-retry", { repo_id: 1, repo_owner: "acme", repo_name: "original" });
       await env.DB.prepare(
-        "UPDATE automation_runs SET repo_owner = ?, repo_name = ?, repo_id = ?, environment_id = ? WHERE id = 'first'"
+        "UPDATE automation_runs SET repo_owner = ?, repo_name = ?, repo_id = ?, environment_id = ? WHERE id = 'first:retry'"
       )
         .bind(
           kind === "repository" ? "acme" : null,
@@ -196,13 +407,12 @@ describe("automation retry review regressions (real D1)", () => {
         policy
       );
       expect(outcome).toEqual({ kind: "steered", invocationId: "inv" });
-      expect(await store.getHeldPrompts("first")).toHaveLength(1);
+      expect(await store.getHeldPrompts("first:retry")).toHaveLength(1);
       await sweepHeldPrompts(deps, Date.now() + 120_000);
-      expect(await store.getHeldPrompts("first")).toHaveLength(1);
-      const due = (await store.getRunById("auto", "first"))!.retry_at!;
-      expect(await claimRetry(env.DB, "first", "second", due)).not.toBeNull();
-      expect(await store.getHeldPrompts("first")).toEqual([]);
-      expect(await store.getHeldPrompts("second")).toHaveLength(1);
+      expect(await store.getHeldPrompts("first:retry")).toHaveLength(1);
+      const due = (await store.getRunById("auto", "first:retry"))!.retry_at!;
+      expect(await claimRetry(env.DB, "first", due)).not.toBeNull();
+      expect(await store.getHeldPrompts("first:retry")).toHaveLength(1);
       await env.DB.prepare(
         "INSERT INTO sessions (id, status, created_at, updated_at) VALUES ('retry-session', 'active', 1, 1)"
       ).run();
@@ -210,17 +420,17 @@ describe("automation retry review regressions (real D1)", () => {
         Response.json({ messageId: "follow-up", status: "queued" })
       );
       const releaseDeps = { ...deps, env: schedulerEnv(promptFetch) };
-      await store.claimRunSession("second", "retry-session", due, due + 60_000);
-      await store.markRunFirstPromptQueued("second");
+      await store.claimRunSession("first:retry", "retry-session", due, due + 60_000);
+      await store.markRunFirstPromptQueued("first:retry");
       expect(
-        await releaseHeldPrompts(releaseDeps, (await store.getRunById("auto", "second"))!)
+        await releaseHeldPrompts(releaseDeps, (await store.getRunById("auto", "first:retry"))!)
       ).toBe(true);
       expect(promptFetch).toHaveBeenCalledTimes(1);
       expect(await promptFetch.mock.calls[0]![0].clone().json()).toMatchObject({
         content: "Follow-up",
         clientRequestId: "delivery-1",
       });
-      expect(await store.getHeldPrompts("second")).toEqual([]);
+      expect(await store.getHeldPrompts("first:retry")).toEqual([]);
     }
   );
 
@@ -251,17 +461,21 @@ describe("automation retry review regressions (real D1)", () => {
       buildPrompt: async () => {
         builds++;
         if (builds === 1) {
-          const due = (await store.getRunById("auto", "first"))!.retry_at!;
-          await claimRetry(env.DB, "first", "second", due);
-        }
-        if (builds === 2) {
+          const due = (await store.getRunById("auto", "first:retry"))!.retry_at!;
+          await claimRetry(env.DB, "first", due);
+
           await env.DB.prepare(
             "INSERT INTO sessions (id, status, created_at, updated_at) VALUES ('retry-session', 'active', ?, ?)"
           )
             .bind(Date.now(), Date.now())
             .run();
-          await store.claimRunSession("second", "retry-session", Date.now(), Date.now() + 60_000);
-          await store.markRunFirstPromptQueued("second");
+          await store.claimRunSession(
+            "first:retry",
+            "retry-session",
+            Date.now(),
+            Date.now() + 60_000
+          );
+          await store.markRunFirstPromptQueued("first:retry");
         }
         return {
           body: { content: "Follow-up", source: "automation", authorId: "user-1" },
@@ -273,7 +487,7 @@ describe("automation retry review regressions (real D1)", () => {
       await continueSession(deps, (await store.getById("auto"))!, "thread", Date.now(), policy)
     ).toEqual({ kind: "steered", invocationId: "inv" });
     expect(promptFetch).toHaveBeenCalledTimes(1);
-    expect(builds).toBe(3);
+    expect(builds).toBe(2);
   });
 
   it("the bounded finalization scan reaches terminal failures behind pending fan-outs", async () => {
