@@ -22,6 +22,7 @@ export interface EnqueuePromptCoreData {
   clientRequestId?: string;
 }
 
+/** Admission receipt; execution may still be pending or may already have finished on retry. */
 export interface EnqueuedPrompt {
   messageId: string;
   position: number | null;

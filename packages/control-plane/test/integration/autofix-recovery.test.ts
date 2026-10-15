@@ -13,7 +13,7 @@ import { ModalSandboxProvider } from "../../src/sandbox/providers/modal-provider
 import { SANDBOX_RUNTIME_VERSION } from "../../src/sandbox/runtime-manifest";
 import { createSessionRuntime } from "../../src/session/components";
 import { SessionInternalPaths } from "../../src/session/contracts";
-import { SandboxPromptBlockedError } from "../../src/session/message-queue";
+import { SandboxPromptBlockedError } from "../../src/session/prompt-admission";
 import { MessageRepository } from "../../src/session/message-repository";
 import {
   SandboxShutdownRepository,

@@ -108,6 +108,7 @@ import { resolveSessionRepoId } from "./repo-id-resolution";
 import { Scheduler } from "../scheduler/scheduler";
 import { PresenceService } from "./presence-service";
 import { SessionMessageQueue } from "./message-queue";
+import { SessionPromptAdmission, type PromptPolicy } from "./prompt-admission";
 import { SessionBudgetService } from "./budget-service";
 import { ExecutionStopCoordinator } from "./execution-stop-coordinator";
 import { MessageFailureService } from "./message-failure-service";
@@ -529,19 +530,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     (): void => messageQueue.broadcastPromptQueue(),
     (): Promise<void> => messageQueue.processMessageQueue()
   );
-  const messageQueue: SessionMessageQueue = new SessionMessageQueue(
-    backgroundTasks,
-    log,
-    sessionCoreRepository,
-    messageRepository,
-    participantRepository,
-    attachmentRepository,
-    wsManager,
-    messenger,
-    participantService,
-    callbackService,
-    statusService,
-    async (model) => {
+  const promptPolicy: PromptPolicy = {
+    async getProviderAuthenticationError(model) {
       const session = sessionCoreRepository.getSession();
       try {
         await validateHarnessExecution(db, env, {
@@ -554,15 +544,41 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
       }
       return userEnvResolver.getProviderAuthenticationError(model);
     },
+    getSandboxPromptBlockReason: () =>
+      sandboxPromptBlockReason(lifecycleManager.shutdownSnapshot()),
+  };
+  const promptAdmission = new SessionPromptAdmission(
+    backgroundTasks,
+    log,
+    sessionCoreRepository,
+    messageRepository,
+    participantRepository,
+    attachmentRepository,
+    participantService,
+    statusService,
+    messenger,
+    sessionIndexStore,
+    promptPolicy
+  );
+  const messageQueue: SessionMessageQueue = new SessionMessageQueue(
+    backgroundTasks,
+    log,
+    sessionCoreRepository,
+    messageRepository,
+    participantRepository,
+    wsManager,
+    messenger,
+    participantService,
+    callbackService,
+    statusService,
+    promptPolicy,
     messageFailures,
     lifecycleManager,
-    sessionIndexStore,
     scmProviderName,
     alarmScheduler,
     executionStop,
     getExecutionTimeoutMs,
-    () => lifecycleManager.mayProcessQueuedWork(),
-    () => sandboxPromptBlockReason(lifecycleManager.shutdownSnapshot())
+    promptAdmission
   );
 
   // Tier 7 — services over the queue and lifecycle.
@@ -1005,6 +1021,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   const clientCommands = new SessionClientCommandFacade(
     connectionAuthenticator,
     messageQueue,
+    promptAdmission,
+    wsManager,
     () => executionStop.stop(),
     presenceService,
     eventStream,

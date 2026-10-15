@@ -384,6 +384,7 @@ function buildSandboxIdForSession(session: SessionRow, now: number): string {
 export type SandboxStartupIntent = "spawn" | "warm";
 
 export interface SandboxLifecycle {
+  mayProcessQueuedWork(): boolean;
   spawnSandbox(intent?: SandboxStartupIntent): Promise<void>;
   updateLastActivity(timestamp: number): void;
   onPromptDispatched(): void;
