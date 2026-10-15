@@ -92,7 +92,10 @@ worker/environment sharing the provider account/project, manual pins, and rollba
 any bases needed by saved sessions or prepared images. Entries match exact provider IDs or exact
 base-build names; protecting a Vercel name retains every snapshot under that name. The command
 requires at least one protected reference and, when managed artifacts exist, a matching managed
-artifact. A prefix is ownership scope, not evidence that an artifact is unused.
+artifact. Every protected reference matching the managed naming pattern must resolve in inventory,
+even when another protection matches; missing managed references abort both preview and apply.
+Manual and out-of-scope references remain allowed. A prefix is ownership scope, not evidence that an
+artifact is unused.
 
 | Provider     | Environment variables                                                                         | Policy prefix                                          |
 | ------------ | --------------------------------------------------------------------------------------------- | ------------------------------------------------------ |

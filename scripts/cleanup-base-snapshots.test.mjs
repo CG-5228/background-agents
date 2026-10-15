@@ -148,6 +148,44 @@ test("inventory failure prevents deletion and delete failure stops the batch", a
   assert.equal(deletes, 1);
 });
 
+test("every protected managed name must resolve before preview or deletion", async () => {
+  for (const [provider, prefix, baseName] of [
+    ["opencomputer", "openinspect-runtime", name],
+    ["vercel", "openinspect-base", (i) => `openinspect-base-${i.toString(16).padStart(16, "0")}`],
+    ["daytona", "my-base", (i) => `my-base-m2-${i.toString(16).padStart(16, "0")}`],
+  ]) {
+    const config = {
+      ...policy,
+      provider,
+      prefix,
+      protectedReferences: [baseName(0), baseName(11)],
+    };
+    const inventory = [0, 1, 2].map((i) => artifact(i, { name: baseName(i) }));
+    for (const items of [inventory, []]) {
+      for (const apply of [false, true]) {
+        const deleted = [];
+        await assert.rejects(
+          cleanup({ list: async () => items, delete: async (item) => deleted.push(item) }, config, {
+            apply,
+            nowMs: NOW_MS,
+          }),
+          /Protected managed reference is absent from inventory/
+        );
+        assert.deepEqual(deleted, []);
+      }
+    }
+  }
+});
+
+test("manual and out-of-scope protections may accompany resolved managed protections", () => {
+  const plan = planCleanup(
+    [artifact(0), artifact(1), artifact(2)],
+    { ...policy, protectedReferences: [name(0), "manual-base", "another-prefix-000000000000000b"] },
+    NOW_MS
+  );
+  assert.deepEqual(plan.delete, [{ id: "snap-1", name: name(1) }]);
+});
+
 function mockFetch(handler) {
   const requests = [];
   return {
@@ -155,6 +193,7 @@ function mockFetch(handler) {
     fetch: async (url, options) => {
       requests.push({ url, ...options });
       const result = await handler(url, options);
+      if (result instanceof Response) return result;
       return new Response(result == null ? null : JSON.stringify(result), {
         status: result == null ? 204 : 200,
       });
@@ -179,6 +218,7 @@ test("Daytona paginates all snapshots, scopes names, and deletes by immutable ID
     }
     assert.equal(url.pathname, "/api/snapshots");
     const page = Number(url.searchParams.get("page"));
+    assert.equal(url.searchParams.get("limit"), "100");
     assert.equal(url.searchParams.get("sort"), "createdAt");
     return {
       items: [
@@ -215,9 +255,13 @@ test("Vercel resolves managed names and follows sandbox and snapshot cursors wit
       assert.equal(url.pathname, "/api/v2/sandboxes/snapshots/old%2Fid");
       return;
     }
+    const limit = Number(url.searchParams.get("limit"));
+    if (limit > 50) return new Response(null, { status: 400 });
+    assert.ok(limit >= 1, "both Vercel list endpoints require a positive supported limit");
     const cursor = url.searchParams.get("cursor");
     if (url.pathname === "/api/v2/sandboxes") {
       assert.equal(url.searchParams.get("namePrefix"), "openinspect-base-");
+      assert.equal(url.searchParams.get("sortBy"), "name");
       return {
         sandboxes: cursor ? [{ name: b }, { name: `${a}-verify` }] : [{ name: a }],
         pagination: { next: cursor ? null : "sandbox-page2" },
@@ -244,6 +288,22 @@ test("Vercel resolves managed names and follows sandbox and snapshot cursors wit
   const result = await cleanup(client, config, { apply: true, nowMs: NOW_MS });
   assert.deepEqual(result.deleted, [{ id: "old/id", name: b }]);
   assert.equal(mock.requests.length, 6);
+});
+
+test("Vercel prefix discovery sorts by name", async () => {
+  const config = validatePolicy({ ...policy, provider: "vercel" });
+  const mock = mockFetch((url) => {
+    assert.equal(url.pathname, "/api/v2/sandboxes");
+    assert.equal(url.searchParams.get("namePrefix"), "openinspect-base-");
+    if (url.searchParams.get("sortBy") !== "name") return new Response(null, { status: 400 });
+    return { sandboxes: [], pagination: { next: null } };
+  });
+  const client = createSnapshotClient(
+    config,
+    { VERCEL_TOKEN: "test", VERCEL_PROJECT_ID: "project" },
+    mock.fetch
+  );
+  assert.deepEqual(await client.list(), []);
 });
 
 test("malformed or repeated pagination cannot authorize partial cleanup", async () => {

@@ -54,6 +54,12 @@ export function planCleanup(inventory, input, nowMs = Date.now()) {
     seen.add(snapshot.id);
   }
   const protectedReferences = new Set(policy.protectedReferences);
+  const managedNames = new Set(managed.map((snapshot) => snapshot.name));
+  for (const reference of protectedReferences) {
+    if (pattern.test(reference) && !managedNames.has(reference) && !seen.has(reference)) {
+      throw new Error(`Protected managed reference is absent from inventory: ${reference}`);
+    }
+  }
   const isProtected = (snapshot) =>
     protectedReferences.has(snapshot.id) || protectedReferences.has(snapshot.name);
   if (managed.length && !managed.some(isProtected)) {

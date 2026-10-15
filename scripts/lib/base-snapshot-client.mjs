@@ -1,7 +1,8 @@
 // Provider contracts match the repository's REST clients and installed OpenComputer SDK.
 // Vercel snapshots have no name: resolve ownership through their named source sandbox.
 const REQUEST_TIMEOUT_MS = 60_000;
-const PAGE_SIZE = 100;
+const VERCEL_PAGE_SIZE = 50;
+const DAYTONA_PAGE_SIZE = 100;
 
 export function managedNamePattern(policy) {
   // Match Terraform's complete content-hash name, never arbitrary openinspect-* artifacts.
@@ -100,7 +101,7 @@ export function createSnapshotClient(policy, env, fetchFn) {
     const cursors = new Set();
     let cursor;
     do {
-      const page = await request(path, { ...query, limit: PAGE_SIZE, cursor });
+      const page = await request(path, { ...query, limit: VERCEL_PAGE_SIZE, cursor });
       if (
         !Array.isArray(page[key]) ||
         !page.pagination ||
@@ -129,7 +130,7 @@ export function createSnapshotClient(policy, env, fetchFn) {
         for (let pageNumber = 1; ; pageNumber++) {
           const page = await request("/snapshots", {
             page: pageNumber,
-            limit: PAGE_SIZE,
+            limit: DAYTONA_PAGE_SIZE,
             sort: "createdAt",
             order: "asc",
           });
@@ -149,6 +150,7 @@ export function createSnapshotClient(policy, env, fetchFn) {
       }
       const sandboxes = await cursorPages("/v2/sandboxes", "sandboxes", {
         namePrefix: `${policy.prefix}-`,
+        sortBy: "name",
       });
       const snapshots = [];
       // Only immutable Terraform base-build names, excluding verification/session sandboxes.
