@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "sandbox:images": "python3 packages/sandbox-images/cli.py",
+    "sandbox:cleanup-base-snapshots": "node scripts/cleanup-base-snapshots.mjs",
     "lint": "eslint .",
     "lint:complexity": "node scripts/lint-complexity.mjs",
     "lint:sql-portability": "node scripts/lint-sql-portability.mjs",
@@ -23,6 +24,7 @@
     "test:user-merge-cli": "node --experimental-transform-types --test scripts/merge-split-users.test.ts",
     "test:cf-logs-cli": "node --test scripts/cf-logs.test.ts",
     "test:terraform-workflow-contract": "node --test scripts/terraform-workflow-contract.test.mjs scripts/terraform-plan-comment.test.mjs",
+    "test:base-snapshot-retention": "node --test scripts/cleanup-base-snapshots.test.mjs",
     "test:node-version-workflow-contract": "node --test scripts/node-version-workflow-contract.test.mjs",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "test:coverage-gate": "node --test scripts/check-coverage.test.mjs",
