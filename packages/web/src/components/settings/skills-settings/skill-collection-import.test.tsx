@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /// <reference types="@testing-library/jest-dom" />
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,7 +30,11 @@ vi.mock("@/hooks/use-repos", () => ({
   }),
 }));
 vi.mock("@/hooks/use-environments", () => ({
-  useEnvironments: () => ({ environments: [], loading: false, error: undefined }),
+  useEnvironments: () => ({
+    environments: [{ id: "env-production", name: "Production" }],
+    loading: false,
+    error: undefined,
+  }),
 }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() } }));
 
@@ -165,6 +169,68 @@ describe("SkillImport collection mode", () => {
       assignments: [{ type: "global" }],
     });
     expect(onImported).toHaveBeenCalledWith(null);
+  });
+
+  it.each([false, true])("preserves exclusions on refresh (new member: %s)", async (addMember) => {
+    const user = userEvent.setup();
+    const initial = {
+      ...preview,
+      skills: [member("deploy", "catalog/deploy", true), member("review", "catalog/review", true)],
+    };
+    const refreshed = {
+      ...initial,
+      skills: [
+        ...initial.skills,
+        ...(addMember ? [member("diagnose", "catalog/diagnose", true)] : []),
+      ],
+    };
+    previewBulkSkillImportMock.mockResolvedValueOnce(initial).mockResolvedValueOnce(refreshed);
+    render(<SkillImport onImported={vi.fn()} onCancel={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Skill collection" }));
+    await user.click(screen.getByLabelText("Repository"));
+    await user.click(await screen.findByRole("option", { name: "acme/skills" }));
+    await user.click(screen.getByRole("button", { name: "Preview collection" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select review" }));
+    await user.click(screen.getByRole("button", { name: "Refresh preview" }));
+    expect(screen.getByRole("checkbox", { name: "Select deploy" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select review" })).not.toBeChecked();
+    if (addMember)
+      expect(screen.getByRole("checkbox", { name: "Select diagnose" })).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Import 1 skills" }));
+    expect(
+      bulkImportSkillsMock.mock.calls[0][0].skills.map((skill: { name: string }) => skill.name)
+    ).toEqual(["deploy"]);
+  });
+
+  it("locks membership and assignments until a pending confirmation finishes", async () => {
+    let reject!: (error: Error) => void;
+    bulkImportSkillsMock.mockReturnValueOnce(
+      new Promise((_resolve, rejectImport) => {
+        reject = rejectImport;
+      })
+    );
+    const user = userEvent.setup();
+    render(<SkillImport onImported={vi.fn()} onCancel={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Skill collection" }));
+    await user.click(screen.getByLabelText("Repository"));
+    await user.click(await screen.findByRole("option", { name: "acme/skills" }));
+    await user.click(screen.getByRole("button", { name: "Preview collection" }));
+    await user.click(screen.getByRole("button", { name: "Import 1 skills" }));
+    const controls = [
+      "Select deploy",
+      "Select all available skills",
+      "All sessions (global)",
+      "acme/skills",
+      "Production",
+    ].map((name) => screen.getByRole("checkbox", { name }));
+    for (const control of controls) expect(control).toBeDisabled();
+    await user.click(controls[0]);
+    await user.click(controls[2]);
+    expect(controls[0]).toBeChecked();
+    expect(controls[2]).toBeChecked();
+    expect(bulkImportSkillsMock.mock.calls[0][0].assignments).toEqual([{ type: "global" }]);
+    await act(async () => reject(new Error("Retry import")));
+    for (const control of controls) expect(control).toBeEnabled();
   });
 
   it("renders a 64-skill selection list without mounting closed file details", async () => {

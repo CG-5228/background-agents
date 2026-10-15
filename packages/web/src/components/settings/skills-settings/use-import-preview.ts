@@ -7,7 +7,8 @@ import { errorMessage } from "./utils";
 /** Own the race-safe lifecycle shared by import and re-import previews. */
 export function useImportPreview<T>(
   loadPreview: () => Promise<T>,
-  onLoadingChange?: (loading: boolean) => void
+  onLoadingChange?: (loading: boolean) => void,
+  onSuccess?: (result: T) => void
 ) {
   const [preview, setPreview] = useState<T | null>(null);
   const [loading, setLoading] = useState(false);
@@ -33,6 +34,7 @@ export function useImportPreview<T>(
     try {
       const result = await loadPreview();
       if (!mounted.current || version !== requestVersion.current) return null;
+      onSuccess?.(result);
       setPreview(result);
       return result;
     } catch (error) {

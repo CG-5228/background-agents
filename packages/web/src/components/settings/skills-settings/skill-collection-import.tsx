@@ -47,7 +47,8 @@ export function SkillCollectionImport({
   const [importing, setImporting] = useState(false);
   const importActive = useRef(false);
   const mounted = useRef(true);
-  const [selectedRoots, setSelectedRoots] = useState<Set<string>>(() => new Set());
+  // null marks initial discovery; refresh failures retain the last selection.
+  const [selectedRoots, setSelectedRoots] = useState<Set<string> | null>(null);
   const [assignmentKeys, setAssignmentKeys] = useState(
     () => new Set(INITIAL_ASSIGNMENTS.map(assignmentKey))
   );
@@ -78,30 +79,35 @@ export function SkillCollectionImport({
     loading: loadingPreview,
     run: loadPreview,
     invalidate: invalidatePreview,
-  } = useImportPreview(() => previewBulkSkillImport({ source: sourceInput() }), onBusyChange);
-
-  async function runPreview() {
-    const result = await loadPreview();
-    if (!result) return;
-    setSelectedRoots(
-      new Set(
-        result.skills
-          .filter((skill) => skill.nameAvailable)
-          .map((skill) => skill.source.subdirectory ?? "")
-      )
-    );
-  }
+  } = useImportPreview(
+    () => previewBulkSkillImport({ source: sourceInput() }),
+    onBusyChange,
+    (result) => {
+      setSelectedRoots(
+        (current) =>
+          new Set(
+            result.skills
+              .filter(
+                (skill) =>
+                  skill.nameAvailable &&
+                  (current === null || current.has(skill.source.subdirectory ?? ""))
+              )
+              .map((skill) => skill.source.subdirectory ?? "")
+          )
+      );
+    }
+  );
 
   function editSource(apply: () => void) {
     apply();
     invalidatePreview();
-    setSelectedRoots(new Set());
+    setSelectedRoots(null);
   }
 
   async function confirmImport() {
     if (!preview || loadingPreview || importActive.current) return;
     const selected = preview.skills.filter(
-      (skill) => skill.nameAvailable && selectedRoots.has(skill.source.subdirectory ?? "")
+      (skill) => skill.nameAvailable && selectedRoots?.has(skill.source.subdirectory ?? "")
     );
     if (selected.length === 0) return;
     importActive.current = true;
@@ -136,7 +142,7 @@ export function SkillCollectionImport({
 
   const selectedCount =
     preview?.skills.filter(
-      (skill) => skill.nameAvailable && selectedRoots.has(skill.source.subdirectory ?? "")
+      (skill) => skill.nameAvailable && selectedRoots?.has(skill.source.subdirectory ?? "")
     ).length ?? 0;
   const tooManyAssignments = assignmentKeys.size > MAX_BULK_SKILL_IMPORT_ASSIGNMENTS;
 
@@ -205,7 +211,7 @@ export function SkillCollectionImport({
       <div className="flex flex-wrap justify-end gap-2">
         <Button
           variant="subtle"
-          onClick={runPreview}
+          onClick={loadPreview}
           disabled={!selectedRepo || loadingPreview || importing}
         >
           {loadingPreview ? "Reading..." : preview ? "Refresh preview" : "Preview collection"}
@@ -213,10 +219,10 @@ export function SkillCollectionImport({
       </div>
 
       {preview && (
-        <>
+        <fieldset disabled={loadingPreview || importing} className="min-w-0 space-y-6">
           <BulkSkillImportReview
             preview={preview}
-            selectedRoots={selectedRoots}
+            selectedRoots={selectedRoots ?? new Set()}
             onToggle={(root, checked) =>
               setSelectedRoots((current) => {
                 const next = new Set(current);
@@ -275,7 +281,7 @@ export function SkillCollectionImport({
               {importing ? "Importing..." : `Import ${selectedCount} skills`}
             </Button>
           </div>
-        </>
+        </fieldset>
       )}
     </div>
   );
