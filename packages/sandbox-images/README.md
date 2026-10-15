@@ -119,6 +119,12 @@ npm run --silent sandbox:cleanup-base-snapshots -- --policy /tmp/base-retention.
 npm run --silent sandbox:cleanup-base-snapshots -- --policy /tmp/base-retention.json --apply
 ```
 
+The npm command builds the shared package and bundles the Node entry point before running it.
+Inventory and deletion use the canonical Vercel/Daytona clients and OpenComputer's `Snapshots` SDK;
+the typed adapters only identify base artifacts and normalize their metadata for the retention
+planner. Provider request handling and pagination stay with those clients. Diagnostics go to stderr
+so stdout remains the JSON cleanup report.
+
 Pause deployments and manual reference changes while collecting protections and running cleanup. Run
 the same command periodically in your operator job only if it refreshes protections and shares the
 deployment lock. This command does not discover deployed workers or add an automatic schedule; a

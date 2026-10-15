@@ -5,8 +5,17 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { cleanup, planCleanup, validatePolicy } from "./cleanup-base-snapshots.mjs";
-import { createSnapshotClient, managedNamePattern } from "./lib/base-snapshot-client.mjs";
+import {
+  cleanup,
+  planCleanup,
+  validatePolicy,
+  managedNamePattern,
+} from "./lib/base-snapshot-retention.mjs";
+import {
+  createSnapshotClient,
+  daytonaBaseSnapshots,
+  openComputerBaseSnapshots,
+} from "./lib/base-snapshot-client.ts";
 
 const name = (i) => `openinspect-runtime-${i.toString(16).padStart(16, "0")}`;
 const NOW_MS = Date.UTC(2026, 9, 15);
@@ -192,7 +201,7 @@ function mockFetch(handler) {
     requests,
     fetch: async (url, options) => {
       requests.push({ url, ...options });
-      const result = await handler(url, options);
+      const result = await handler(new URL(url), options);
       if (result instanceof Response) return result;
       return new Response(result == null ? null : JSON.stringify(result), {
         status: result == null ? 204 : 200,
@@ -201,7 +210,7 @@ function mockFetch(handler) {
   };
 }
 
-test("Daytona paginates all snapshots, scopes names, and deletes by immutable ID", async () => {
+test("Daytona paginates all snapshots, scopes names, and deletes by immutable ID", async (t) => {
   const prefix = "openinspect-daytona";
   const baseName = (i) => `${prefix}-m2-${i.toString(16).padStart(16, "0")}`;
   const config = validatePolicy({
@@ -233,23 +242,23 @@ test("Daytona paginates all snapshots, scopes names, and deletes by immutable ID
       totalPages: 3,
     };
   });
-  const client = createSnapshotClient(
-    config,
-    { DAYTONA_API_KEY: "daytona-test", DAYTONA_API_URL: "https://daytona.test/api" },
-    mock.fetch
-  );
+  t.mock.method(globalThis, "fetch", mock.fetch);
+  const client = createSnapshotClient(config, {
+    DAYTONA_API_KEY: "daytona-test",
+    DAYTONA_API_URL: "https://daytona.test/api",
+  });
   const plan = await cleanup(client, config, { apply: true, nowMs: NOW_MS });
   assert.deepEqual(plan.deleted, [{ id: "id-1", name: baseName(1) }]);
   assert.equal(mock.requests.length, 4);
 });
 
-test("Vercel resolves managed names and follows sandbox and snapshot cursors with project/team scope", async () => {
+test("Vercel resolves managed names and follows sandbox and snapshot cursors with project/team scope", async (t) => {
   const a = "openinspect-base-0000000000000000";
   const b = "openinspect-base-1111111111111111";
   const config = validatePolicy({ ...policy, provider: "vercel", protectedReferences: [a] });
   const mock = mockFetch((url, options) => {
-    assert.equal(options.headers.Authorization, "Bearer vercel-test");
-    assert.equal(url.searchParams.get("project"), "project-1");
+    assert.equal(new Headers(options.headers).get("Authorization"), "Bearer vercel-test");
+    if (options.method === "GET") assert.equal(url.searchParams.get("project"), "project-1");
     assert.equal(url.searchParams.get("teamId"), "team-1");
     if (options.method === "DELETE") {
       assert.equal(url.pathname, "/api/v2/sandboxes/snapshots/old%2Fid");
@@ -263,7 +272,12 @@ test("Vercel resolves managed names and follows sandbox and snapshot cursors wit
       assert.equal(url.searchParams.get("namePrefix"), "openinspect-base-");
       assert.equal(url.searchParams.get("sortBy"), "name");
       return {
-        sandboxes: cursor ? [{ name: b }, { name: `${a}-verify` }] : [{ name: a }],
+        sandboxes: (cursor ? [b, `${a}-verify`] : [a]).map((name) => ({
+          name,
+          currentSessionId: "session",
+          createdAt: 1,
+          status: "stopped",
+        })),
         pagination: { next: cursor ? null : "sandbox-page2" },
       };
     }
@@ -271,26 +285,32 @@ test("Vercel resolves managed names and follows sandbox and snapshot cursors wit
     const base = url.searchParams.get("name");
     const id = base === a ? "protected" : cursor ? "latest" : "old/id";
     return {
-      snapshots: [{ id, status: "created", createdAt: cursor ? 200 : 100 }],
+      snapshots: [
+        {
+          id,
+          sourceSessionId: "session",
+          sizeBytes: 1,
+          updatedAt: 200,
+          status: "created",
+          createdAt: cursor ? 200 : 100,
+        },
+      ],
       pagination: { next: base === b && !cursor ? "snapshot-page2" : null },
     };
   });
-  const client = createSnapshotClient(
-    config,
-    {
-      VERCEL_TOKEN: "vercel-test",
-      VERCEL_PROJECT_ID: "project-1",
-      VERCEL_TEAM_ID: "team-1",
-      VERCEL_SANDBOX_API_BASE_URL: "https://vercel.test/api",
-    },
-    mock.fetch
-  );
+  t.mock.method(globalThis, "fetch", mock.fetch);
+  const client = createSnapshotClient(config, {
+    VERCEL_TOKEN: "vercel-test",
+    VERCEL_PROJECT_ID: "project-1",
+    VERCEL_TEAM_ID: "team-1",
+    VERCEL_SANDBOX_API_BASE_URL: "https://vercel.test/api",
+  });
   const result = await cleanup(client, config, { apply: true, nowMs: NOW_MS });
   assert.deepEqual(result.deleted, [{ id: "old/id", name: b }]);
   assert.equal(mock.requests.length, 6);
 });
 
-test("Vercel prefix discovery sorts by name", async () => {
+test("Vercel prefix discovery sorts by name", async (t) => {
   const config = validatePolicy({ ...policy, provider: "vercel" });
   const mock = mockFetch((url) => {
     assert.equal(url.pathname, "/api/v2/sandboxes");
@@ -298,24 +318,24 @@ test("Vercel prefix discovery sorts by name", async () => {
     if (url.searchParams.get("sortBy") !== "name") return new Response(null, { status: 400 });
     return { sandboxes: [], pagination: { next: null } };
   });
-  const client = createSnapshotClient(
-    config,
-    { VERCEL_TOKEN: "test", VERCEL_PROJECT_ID: "project" },
-    mock.fetch
-  );
+  t.mock.method(globalThis, "fetch", mock.fetch);
+  const client = createSnapshotClient(config, {
+    VERCEL_TOKEN: "test",
+    VERCEL_PROJECT_ID: "project",
+  });
   assert.deepEqual(await client.list(), []);
 });
 
-test("malformed or repeated pagination cannot authorize partial cleanup", async () => {
+test("malformed or repeated pagination cannot authorize partial cleanup", async (t) => {
   const config = validatePolicy({ ...policy, provider: "vercel" });
   for (const payload of [{ sandboxes: [] }, { sandboxes: [], pagination: { next: "repeated" } }]) {
     const mock = mockFetch(() => payload);
-    const client = createSnapshotClient(
-      config,
-      { VERCEL_TOKEN: "test", VERCEL_PROJECT_ID: "project" },
-      mock.fetch
-    );
-    await assert.rejects(cleanup(client, config, { apply: true }), /pagination/);
+    t.mock.method(globalThis, "fetch", mock.fetch);
+    const client = createSnapshotClient(config, {
+      VERCEL_TOKEN: "test",
+      VERCEL_PROJECT_ID: "project",
+    });
+    await assert.rejects(cleanup(client, config, { apply: true }), /pagination|invalid.*response/i);
     assert.equal(
       mock.requests.some((request) => request.method === "DELETE"),
       false
@@ -323,36 +343,75 @@ test("malformed or repeated pagination cannot authorize partial cleanup", async 
   }
 });
 
-test("HTTP errors abort inventory, 404 deletion is idempotent, and credentials are not echoed", async () => {
+test("HTTP errors abort inventory, 404 deletion is idempotent, and credentials are not echoed", async (t) => {
   const config = validatePolicy(policy);
   for (const status of [401, 500]) {
-    const client = createSnapshotClient(
-      config,
-      { OPENCOMPUTER_API_KEY: "secret" },
-      async () => new Response("sensitive response", { status })
-    );
+    t.mock.method(globalThis, "fetch", async () => new Response("sensitive response", { status }));
+    const client = createSnapshotClient(config, { OPENCOMPUTER_API_KEY: "secret" });
     await assert.rejects(
       client.list(),
       (error) => error.message.includes(String(status)) && !error.message.includes("sensitive")
     );
   }
-  const client = createSnapshotClient(
-    config,
-    { OPENCOMPUTER_API_KEY: "secret" },
-    async () => new Response(null, { status: 404 })
+  t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 404 }));
+  for (const [scope, env] of [
+    [config, { OPENCOMPUTER_API_KEY: "secret" }],
+    [
+      { ...config, provider: "vercel" },
+      { VERCEL_TOKEN: "secret", VERCEL_PROJECT_ID: "project" },
+    ],
+    [
+      { ...config, provider: "daytona" },
+      { DAYTONA_API_KEY: "secret", DAYTONA_API_URL: "https://daytona.test/api" },
+    ],
+  ]) {
+    await createSnapshotClient(scope, env).delete({ id: "already-gone", name: "already-gone" });
+  }
+});
+
+test("typed adapters preserve uncertain metadata and normalize only provider readiness", async () => {
+  const daytona = daytonaBaseSnapshots({
+    listSnapshots: async () => [
+      {
+        id: "a",
+        name: name(0),
+        state: "inactive",
+        createdAt: "2020-01-01T00:00:00Z",
+        lastUsedAt: "invalid",
+      },
+      { id: "b", name: name(1), state: "building" },
+      { id: "c", name: name(2), state: "build_failed" },
+    ],
+    deleteSnapshot: async () => {},
+  });
+  const inventory = await daytona.list();
+  assert.deepEqual(
+    inventory.map(({ ready, terminal }) => [ready, terminal]),
+    [
+      [true, true],
+      [false, false],
+      [false, true],
+    ]
   );
-  await client.delete({ name: "already-gone" });
+  assert.ok(Number.isNaN(inventory[0].lastUsedAtMs));
+  assert.ok(Number.isNaN(inventory[1].createdAtMs));
+  const openComputer = openComputerBaseSnapshots({
+    list: async () => [{ id: "a", name: name(0), status: "unknown", createdAt: "invalid" }],
+    delete: async () => {},
+  });
+  const [snapshot] = await openComputer.list();
+  assert.equal(snapshot.terminal, false);
+  assert.ok(Number.isNaN(snapshot.createdAtMs));
 });
 
 test("clients reject missing credentials and insecure non-local URLs", () => {
-  assert.throws(() => createSnapshotClient(policy, {}, fetch), /OPENCOMPUTER_API_KEY/);
+  assert.throws(() => createSnapshotClient(policy, {}), /OPENCOMPUTER_API_KEY/);
   assert.throws(
     () =>
-      createSnapshotClient(
-        policy,
-        { OPENCOMPUTER_API_KEY: "test", OPENCOMPUTER_API_URL: "http://provider.example/api" },
-        fetch
-      ),
+      createSnapshotClient(policy, {
+        OPENCOMPUTER_API_KEY: "test",
+        OPENCOMPUTER_API_URL: "http://provider.example/api",
+      }),
     /HTTPS/
   );
 });
@@ -396,7 +455,7 @@ test("cleanup bounds accumulated base snapshots while preserving the deployed ba
     })
   );
   async function run(args) {
-    const child = spawn(process.execPath, ["scripts/cleanup-base-snapshots.mjs", ...args], {
+    const child = spawn(process.execPath, ["dist/cleanup-base-snapshots.mjs", ...args], {
       env: {
         ...process.env,
         OPENCOMPUTER_API_KEY: "test-token",
