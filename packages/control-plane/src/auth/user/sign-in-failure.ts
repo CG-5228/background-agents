@@ -25,6 +25,7 @@ export function signInFailureLocation(provider: SignInProvider, error: unknown):
     event: "auth.sign_in_rejected",
     provider,
     reason,
+    diagnostic: error instanceof Error ? error.message : undefined,
   });
   const query = new URLSearchParams({ error: reason, provider });
   return `${SIGN_IN_FAILURE_PATH}?${query.toString()}`;
