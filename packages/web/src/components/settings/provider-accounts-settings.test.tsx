@@ -504,7 +504,7 @@ describe("ProviderAccountsSettings", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "ChatGPT" }));
 
     expect(await screen.findByText(/expires in/)).toBeInTheDocument();
-    const liveRegion = document.querySelector('[aria-live="polite"]');
+    const liveRegion = screen.getByRole("dialog").querySelector('[aria-live="polite"]');
     expect(liveRegion).toHaveTextContent(
       "Device authorization started. Waiting for authorization."
     );
