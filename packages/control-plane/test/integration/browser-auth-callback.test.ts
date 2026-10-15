@@ -20,6 +20,7 @@ const PUBLIC_WEB_ORIGIN = "https://app.test.local";
 const WEB_SERVICE_SECRET = "test-service-secret-web";
 const GOOGLE_CLIENT_ID = "google-client-id";
 const GOOGLE_SUBJECT = "google-subject";
+const GITHUB_PERMISSION_DENIED_MESSAGE = "Resource not accessible by integration";
 const MS_PER_SECOND = 1000;
 const GOOGLE_ACCESS_TOKEN_LIFETIME_MS = 60 * 60 * MS_PER_SECOND;
 
@@ -34,6 +35,7 @@ let googleIdToken = "";
 let googlePublicKey: JsonWebKey;
 let googleCertRequestCount = 0;
 let githubEmailLookupStatus = 200;
+let githubEmailLookupMessage = GITHUB_PERMISSION_DENIED_MESSAGE;
 let githubEmailLookupHeaders: Record<string, string> = {};
 
 async function signedWebRequest(
@@ -123,7 +125,7 @@ beforeAll(async () => {
     if (url.startsWith("https://api.github.com/user/emails")) {
       if (githubEmailLookupStatus !== 200) {
         return Response.json(
-          { message: "Resource not accessible by integration" },
+          { message: githubEmailLookupMessage },
           { status: githubEmailLookupStatus, headers: githubEmailLookupHeaders }
         );
       }
@@ -166,6 +168,7 @@ beforeEach(async () => {
   await cleanD1Tables();
   googleCertRequestCount = 0;
   githubEmailLookupStatus = 200;
+  githubEmailLookupMessage = GITHUB_PERMISSION_DENIED_MESSAGE;
   githubEmailLookupHeaders = {};
 });
 
@@ -465,13 +468,21 @@ describe("browser auth callback", () => {
   });
 
   it.each([
-    [403, {}, "provider_rejected", "203.0.113.91"],
-    [403, { "x-ratelimit-remaining": "0" }, "provider_unavailable", "203.0.113.92"],
-    [502, {}, "provider_unavailable", "203.0.113.93"],
+    [403, {}, "provider_rejected", "203.0.113.91", GITHUB_PERMISSION_DENIED_MESSAGE],
+    [
+      403,
+      { "x-ratelimit-remaining": "0" },
+      "provider_unavailable",
+      "203.0.113.92",
+      GITHUB_PERMISSION_DENIED_MESSAGE,
+    ],
+    [502, {}, "provider_unavailable", "203.0.113.93", GITHUB_PERMISSION_DENIED_MESSAGE],
+    [403, {}, "provider_unavailable", "203.0.113.94", "Your account has been suspended"],
   ] as const)(
     "redirects to login when GitHub rejects the email lookup (%s, %j)",
-    async (status, headers, reason, clientIp) => {
+    async (status, headers, reason, clientIp, message) => {
       githubEmailLookupStatus = status;
+      githubEmailLookupMessage = message;
       githubEmailLookupHeaders = headers;
       const requestEnv = {
         ...env,

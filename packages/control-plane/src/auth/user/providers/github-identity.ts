@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { SIGN_IN_PROVIDER_ISSUERS } from "@open-inspect/shared/sign-in-provider";
 import { createLogger, type Logger } from "../../../logger";
+import { readBoundedBytes } from "../../../http/bounded-body";
 import { DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS } from "./constants";
 import { assertCanonicalIssuer, OAuthProviderError, type VerifiedProviderIdentity } from "./types";
 
@@ -9,7 +10,8 @@ const GITHUB_API_VERSION = "2022-11-28";
 const GITHUB_EMAILS_PER_PAGE = 100;
 const GITHUB_EMAILS_MAX_PAGES = 10;
 const GITHUB_NETWORK_REQUEST_ATTEMPTS = 2;
-const ERROR_BODY_TIMED_OUT = Symbol("github-error-body-timed-out");
+const GITHUB_ERROR_BODY_MAX_BYTES = 8 * 1024;
+const GITHUB_ERROR_MESSAGE_MAX_LENGTH = 200;
 
 const githubUserSchema = z.object({
   id: z.number().int().positive(),
@@ -107,16 +109,18 @@ export class GitHubProviderIdentityResolver {
         headers: this.apiHeaders(accessToken),
       });
       if (!response.ok) {
-        // Rate limiting also returns 403. Only a first-page, non-transient
-        // rejection should suggest changing the App's email permission.
+        // A 403 alone does not identify a missing permission. Require GitHub's
+        // permission-denial message and exclude rate limits and later pages.
         const bodyMessage = await this.readGitHubErrorMessage(response, abort);
         const rateLimited =
           response.headers.get("x-ratelimit-remaining") === "0" ||
           response.headers.get("retry-after") !== null ||
-          bodyMessage === ERROR_BODY_TIMED_OUT ||
           /rate.?limit|abuse/i.test(bodyMessage ?? "");
         const permissionHint =
-          response.status === 403 && page === 1 && !rateLimited
+          response.status === 403 &&
+          page === 1 &&
+          bodyMessage === "Resource not accessible by integration" &&
+          !rateLimited
             ? "Grant the GitHub App the Account -> Email addresses: Read-only permission and approve the installation update (see docs/GETTING_STARTED.md step 7)"
             : undefined;
         this.logger.error("GitHub email lookup failed", {
@@ -171,34 +175,34 @@ export class GitHubProviderIdentityResolver {
   private async readGitHubErrorMessage(
     response: Response,
     abort: () => void
-  ): Promise<string | undefined | typeof ERROR_BODY_TIMED_OUT> {
+  ): Promise<string | undefined> {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
-      const text = await Promise.race([
-        response.text(),
-        new Promise<typeof ERROR_BODY_TIMED_OUT>((resolve) => {
-          timeoutId = setTimeout(() => resolve(ERROR_BODY_TIMED_OUT), this.requestTimeoutMs);
+      const body = await Promise.race([
+        readBoundedBytes(
+          response.body,
+          GITHUB_ERROR_BODY_MAX_BYTES,
+          response.headers.get("Content-Length")
+        ),
+        new Promise<null>((resolve) => {
+          timeoutId = setTimeout(() => resolve(null), this.requestTimeoutMs);
         }),
       ]);
-      if (text === ERROR_BODY_TIMED_OUT) {
+      if (body === null) {
         abort();
-        return ERROR_BODY_TIMED_OUT;
-      }
-      if (!text) return undefined;
-      try {
-        const data: unknown = JSON.parse(text);
-        if (
-          typeof data === "object" &&
-          data !== null &&
-          "message" in data &&
-          typeof (data as { message: unknown }).message === "string"
-        ) {
-          return (data as { message: string }).message;
-        }
         return undefined;
-      } catch {
-        return text.slice(0, 200);
       }
+      if (!body.ok) return undefined;
+      const data: unknown = JSON.parse(new TextDecoder().decode(body.bytes));
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        "message" in data &&
+        typeof data.message === "string"
+      ) {
+        return data.message.slice(0, GITHUB_ERROR_MESSAGE_MAX_LENGTH);
+      }
+      return undefined;
     } catch {
       return undefined;
     } finally {
