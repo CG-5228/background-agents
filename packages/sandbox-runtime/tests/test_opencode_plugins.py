@@ -147,6 +147,44 @@ async def test_initialization_timeout_restarts_without_managed_plugins(tmp_path)
     assert server._plugin_status == {"slow@1.0.0": "skipped"}
 
 
+async def test_shutdown_during_startup_does_not_restart_or_skip_plugins(
+    tmp_path, isolated_opencode
+):
+    server = make_opencode_server(
+        {"SESSION_CONFIG": '{"opencode_plugins":["audit@1.0.0"]}'}, workspace_path=tmp_path
+    )
+    server.record_boot_warning = MagicMock()
+
+    async def spawn(*args, **kwargs):
+        # Shutdown begins while the first process is being created. The real
+        # health check must abort startup without launching the fallback.
+        server.shutdown_event.set()
+        return MagicMock(stdout=None)
+
+    with (
+        patch.object(server, "_prepare_opencode_filesystem", return_value=set()),
+        patch.object(server, "_initialize_plugins", new_callable=AsyncMock) as initialize,
+        patch.object(server, "stop", new_callable=AsyncMock) as stop,
+        patch("sandbox_runtime.opencode_server.install_plugin", new_callable=AsyncMock),
+        patch(
+            "sandbox_runtime.opencode_server.asyncio.create_subprocess_exec",
+            side_effect=spawn,
+        ) as process_spawn,
+        patch(
+            "sandbox_runtime.opencode_server.asyncio.create_task",
+            side_effect=lambda coro: coro.close(),
+        ),
+        pytest.raises(RuntimeError, match="Shutdown requested during startup"),
+    ):
+        await server.start((), tmp_path)
+    assert process_spawn.call_count == 1
+    stop.assert_not_awaited()
+    initialize.assert_not_awaited()
+    server.record_boot_warning.assert_not_called()
+    assert server._plugin_status == {"audit@1.0.0": "pending"}
+    assert server.plugins == ("audit@1.0.0",)
+
+
 @pytest.mark.skipif(
     not shutil.which("opencode") or not Path("/app/opencode-deps").is_dir(),
     reason="requires pinned OpenCode binary",

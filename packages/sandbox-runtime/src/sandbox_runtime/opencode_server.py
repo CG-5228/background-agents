@@ -603,7 +603,7 @@ class OpenCodeServer:
             if plugins:
                 await self._initialize_plugins()
         except Exception:
-            if not plugins:
+            if not plugins or self.shutdown_event.is_set():
                 raise
             # A plugin that hangs or crashes the process cannot be isolated in-process.
             # Retry once with the entire managed selection omitted.
