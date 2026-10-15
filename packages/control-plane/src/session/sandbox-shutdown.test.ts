@@ -515,6 +515,71 @@ describe("SandboxShutdownCoordinator", () => {
     expect(f.deps.reconcileStatusFromMessages).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { lifetimeMs: 7_200_000, activePrompt: true },
+    { lifetimeMs: 14_400_000, activePrompt: true },
+    { lifetimeMs: 7_200_000, activePrompt: false },
+    { lifetimeMs: 14_400_000, activePrompt: false },
+  ])(
+    "lifetime expiry with lifetimeMs=$lifetimeMs and activePrompt=$activePrompt preserves the continuation policy",
+    async ({ lifetimeMs, activePrompt }) => {
+      const takeSnapshot = vi.fn(async () => ({
+        success: true as const,
+        imageId: "expiry-snapshot",
+        sourceStopped: true,
+      }));
+      const f = fixture(provider({ takeSnapshot }), { durable: true });
+      f.deps.messages.getProcessingMessage.mockReturnValue(
+        activePrompt ? { id: "active-at-expiry" } : null
+      );
+      await readyFinite(f, GENERATION.createdAt + lifetimeMs);
+      const drainAtMs = f.store.value!.drainAtMs!;
+
+      f.setNow(drainAtMs - 1);
+      await f.shutdown.handleAlarm();
+      expect(f.store.value?.phase).toBe("running");
+      expect(f.deps.failures.record).not.toHaveBeenCalled();
+
+      // A fresh heartbeat does not renew the provider's absolute lifetime.
+      f.setNow(drainAtMs);
+      f.sandboxRow.last_heartbeat = drainAtMs;
+      await f.shutdown.handleAlarm();
+      expect(f.store.value).toMatchObject({
+        phase: "draining",
+        reason: "sandbox_lifetime_expiring",
+      });
+      if (activePrompt) {
+        expect(f.deps.failures.record).toHaveBeenCalledExactlyOnceWith(
+          "active-at-expiry",
+          "The sandbox reached its maximum lifetime.",
+          drainAtMs,
+          "processing"
+        );
+      } else {
+        expect(f.deps.failures.record).not.toHaveBeenCalled();
+      }
+
+      f.shutdown.prepared(preparedEvent(f.store.value!));
+      await f.shutdown.handleAlarm();
+      expect(takeSnapshot).toHaveBeenCalledOnce();
+      expect(f.store.value).toMatchObject({
+        phase: "saved",
+        sourceRetired: true,
+        receipt: { artifactId: "expiry-snapshot" },
+      });
+
+      const restarted = new SandboxShutdownCoordinator(f.deps as never);
+      expect(restarted.admissionDecision()).toBe(activePrompt ? "held" : "restore_required");
+      expect(restarted.startupDecision().kind).toBe(activePrompt ? "hold" : "restore_snapshot");
+      if (activePrompt) {
+        expect(restarted.snapshot()?.continuationPaused).toBe(true);
+        await restarted.recover("restore_saved");
+        expect(restarted.admissionDecision()).toBe("restore_required");
+        expect(f.deps.failures.record).toHaveBeenCalledOnce();
+      }
+    }
+  );
+
   it("requires a matching generation acknowledgement and ignores a late generation", async () => {
     const f = fixture();
     reserveGeneration(f, GENERATION, "confirmed");
