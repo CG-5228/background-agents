@@ -232,23 +232,38 @@ export function useWarmDraftSession(
   }, [startAttempt]);
 
   /**
-   * Hands back a claimed draft whose first prompt was not sent. It becomes the
-   * hook's draft again while the composer still wants that launch and holds no
-   * other, and is discarded otherwise. The discard is a no-op for a session
-   * that did receive the prompt, so an ambiguous failure cannot lose work.
+   * Hands back a claimed draft whose send failed. A draft whose prompt was
+   * `not_sent` becomes the hook's draft again while the composer still wants
+   * that launch and holds no other. Anything else is discarded, including a
+   * send whose delivery is `unknown`: reusing a session that may already hold
+   * the prompt would put the next send into it. The discard is a no-op for a
+   * session that did receive the prompt, so an ambiguous failure cannot lose
+   * work.
    */
-  const release = useCallback((releasedSessionId: string, launchIdentity: string | null) => {
-    if (disposedRef.current || launchIdentity !== identityRef.current || ownedRef.current) {
-      void discardWarmDraftSession(releasedSessionId);
-      return;
-    }
-    ownedRef.current = {
-      owner: "hook",
-      sessionId: releasedSessionId,
-      result: Promise.resolve({ sessionId: releasedSessionId, error: null }),
-    };
-    setSessionId(releasedSessionId);
-  }, []);
+  const release = useCallback(
+    (
+      releasedSessionId: string,
+      launchIdentity: string | null,
+      delivery: "not_sent" | "unknown"
+    ) => {
+      if (
+        delivery !== "not_sent" ||
+        disposedRef.current ||
+        launchIdentity !== identityRef.current ||
+        ownedRef.current
+      ) {
+        void discardWarmDraftSession(releasedSessionId);
+        return;
+      }
+      ownedRef.current = {
+        owner: "hook",
+        sessionId: releasedSessionId,
+        result: Promise.resolve({ sessionId: releasedSessionId, error: null }),
+      };
+      setSessionId(releasedSessionId);
+    },
+    []
+  );
 
   return { identity, sessionId, isWarming, warm, claim, release, error };
 }

@@ -654,10 +654,26 @@ describe("useWarmDraftSession claims", () => {
       await result.current.claim();
     });
 
-    act(() => result.current.release("session-1", result.current.identity));
+    act(() => result.current.release("session-1", result.current.identity, "not_sent"));
 
     expect(result.current.sessionId).toBe("session-1");
     expect(discardWarmDraftSession).not.toHaveBeenCalled();
+  });
+
+  it("discards a released draft whose prompt may have been delivered", async () => {
+    vi.mocked(browserApiFetch).mockResolvedValue(
+      Response.json({ sessionId: "session-1", status: "created" })
+    );
+    const { result } = renderHook(() => useWarmDraftSession(request()));
+    await act(async () => {
+      await result.current.claim();
+    });
+
+    act(() => result.current.release("session-1", result.current.identity, "unknown"));
+
+    // Reusing it could put the next send into a session that already holds one.
+    expect(result.current.sessionId).toBeNull();
+    expect(discardWarmDraftSession).toHaveBeenCalledWith("session-1");
   });
 
   it.each([
@@ -679,7 +695,7 @@ describe("useWarmDraftSession claims", () => {
 
     if (unmountFirst) unmount();
     else rerender({ launchRequest: otherRepository() });
-    act(() => release("session-1", launchIdentity));
+    act(() => release("session-1", launchIdentity, "not_sent"));
 
     expect(discardWarmDraftSession).toHaveBeenCalledWith("session-1");
   });

@@ -28,6 +28,10 @@ function fakeControlPlane(
     holdPrompt?: boolean;
     holdPromptResponse?: boolean;
     rejectPrompt?: number;
+    /** Queue the prompt, then answer with this status (a lost confirmation). */
+    failAfterQueue?: number;
+    /** The prompt request never gets an answer (network failure). */
+    promptThrows?: boolean;
   } = {}
 ) {
   const sessions = new Map<string, ServerSession>();
@@ -56,12 +60,19 @@ function fakeControlPlane(
         log.push(`prompt rejected ${id}`);
         return Response.json({ error: "Session not found" }, { status: 404 });
       }
+      if (options.promptThrows) {
+        log.push(`prompt lost ${id}`);
+        throw new TypeError("Failed to fetch");
+      }
       if (options.rejectPrompt) {
         log.push(`prompt failed ${id}`);
         return Response.json({ error: "Upstream unavailable" }, { status: options.rejectPrompt });
       }
       session.prompts.push(JSON.parse(String(init?.body)).content);
       log.push(`prompt queued ${id}`);
+      if (options.failAfterQueue) {
+        return Response.json({ error: "Upstream unavailable" }, { status: options.failAfterQueue });
+      }
       if (options.holdPromptResponse) await promptGate.opened;
       return Response.json({ messageId: "m1", status: "queued" });
     }
@@ -217,8 +228,8 @@ describe("Home: leaving mid-send (#2336)", () => {
     await waitFor(() => expect(composer()).toHaveValue("Fix the flaky test"));
   });
 
-  it("hands a failed send back: the text stays stored and the draft is reused", async () => {
-    const server = fakeControlPlane({ rejectPrompt: 503 });
+  it("hands a refused send back: the text stays stored and the draft is reused", async () => {
+    const server = fakeControlPlane({ rejectPrompt: 409 });
     render(<Home />);
     typePrompt();
     await waitFor(() => expect(server.log).toContain("created session-1"));
@@ -236,10 +247,36 @@ describe("Home: leaving mid-send (#2336)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
     await waitFor(() => expect(server.log.filter((e) => e.startsWith("prompt")).length).toBe(2));
-    // The retry goes into the same draft rather than warming another one.
+    // A 4xx means the prompt was refused, so the retry reuses the same draft.
     expect(server.log.filter((entry) => entry.startsWith("created"))).toEqual([
       "created session-1",
     ]);
     expect(server.log.some((entry) => entry.startsWith("discard"))).toBe(false);
+  });
+
+  it.each([
+    { failure: "a 5xx after the prompt was queued", options: { failAfterQueue: 503 } },
+    { failure: "a request that never answered", options: { promptThrows: true } },
+  ])("does not reuse a draft after $failure", async ({ options }) => {
+    const server = fakeControlPlane(options);
+    render(<Home />);
+    typePrompt();
+    await waitFor(() => expect(server.log).toContain("created session-1"));
+    await settle();
+
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(server.log.some((e) => e.startsWith("discard"))).toBe(true));
+    await settle();
+    expect(composer()).toHaveValue("Fix the flaky test");
+
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(server.log).toContain("created session-2"));
+    await waitFor(() =>
+      expect(server.log.some((e) => e.startsWith("prompt") && e.endsWith("session-2"))).toBe(true)
+    );
+    // The retry never lands in the session that may already hold the first send.
+    expect(
+      server.log.filter((e) => e.startsWith("prompt") && e.endsWith("session-1"))
+    ).toHaveLength(1);
   });
 });

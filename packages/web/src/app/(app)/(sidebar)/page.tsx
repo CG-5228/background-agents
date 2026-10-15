@@ -415,6 +415,8 @@ export default function Home() {
     markPromptSending(submittedPrompt);
     let sessionId: string | null = null;
     let sent = false;
+    // Whether the prompt may have reached the server without a confirmation.
+    let mayHaveSent = false;
     try {
       // The draft is ours from here on: leaving the page or changing the
       // launch target no longer discards it underneath the send, and a
@@ -435,6 +437,7 @@ export default function Home() {
         }
       }
 
+      mayHaveSent = true;
       const res = await browserApiFetch(`/api/sessions/${sessionId}/prompt`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -446,6 +449,8 @@ export default function Home() {
         }),
       });
 
+      // A 4xx refused the prompt; a 5xx may have come after it was queued.
+      if (res.status >= 400 && res.status < 500) mayHaveSent = false;
       if (res.ok) {
         sent = true;
         clearSubmittedPrompt(submittedPrompt);
@@ -475,7 +480,9 @@ export default function Home() {
     } finally {
       if (!sent) {
         restoreUnsentPrompt(submittedPrompt);
-        if (sessionId) releaseWarmSession(sessionId, launchIdentity);
+        if (sessionId) {
+          releaseWarmSession(sessionId, launchIdentity, mayHaveSent ? "unknown" : "not_sent");
+        }
       }
       submitInFlightRef.current = false;
       setCreating(false);
