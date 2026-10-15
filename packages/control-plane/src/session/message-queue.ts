@@ -17,6 +17,7 @@ import {
   getDefaultReasoningEffort,
   getValidModelOrDefault,
   isValidModel,
+  isValidReasoningEffort,
 } from "@open-inspect/shared/models";
 import type { SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 import { isSessionPromptable } from "@open-inspect/shared/types/session-activity";
@@ -897,11 +898,17 @@ export class SessionMessageQueue {
    * A draft's first prompt decides its model. The web composer creates the
    * draft before the author has settled on a model, and follow-ups without an
    * override (bots, and the session page's default selection) inherit the
-   * session's, so it takes the model the work actually started with.
+   * session's, so it takes the model the work actually started with. A prompt
+   * that names no effort keeps the draft's, while the adopted model accepts it.
    */
-  private adoptFirstPromptModel(model: string, reasoningEffort: string | null): void {
+  private adoptFirstPromptModel(model: string, messageEffort: string | null): void {
     const session = this.repository.getSession();
     if (session?.status !== "created") return;
+    const inheritedEffort =
+      session.reasoning_effort && isValidReasoningEffort(model, session.reasoning_effort)
+        ? session.reasoning_effort
+        : null;
+    const reasoningEffort = messageEffort ?? inheritedEffort;
     if (session.model === model && (session.reasoning_effort ?? null) === reasoningEffort) return;
     this.repository.updateSessionModel(session.id, model, reasoningEffort);
     const sessionId = session.session_name || session.id;

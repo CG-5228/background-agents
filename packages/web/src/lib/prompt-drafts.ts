@@ -13,12 +13,48 @@ export const NEW_SESSION_PROMPT_DRAFT_ID = "new-session";
 export type StoredPromptDraft = {
   prompt: string;
   pendingRequest: PromptRequestIdentity | null;
+  /**
+   * The prompt was submitted and its outcome is not known yet. It stays stored
+   * so a reload mid-send can offer it again; a composer mounted while the send
+   * is still running in this page leaves it out instead.
+   */
+  sending?: true;
 };
 
 const storedPromptDraftSchema = z.object({
   prompt: z.string().min(1),
   pendingRequest: z.object({ signature: z.string(), clientRequestId: z.string() }).nullable(),
+  sending: z.literal(true).optional(),
 });
+
+const sendsInFlight = new Set<string>();
+const draftListeners = new Map<string, Set<() => void>>();
+
+/** Records that this page is sending the draft stored under `key`. */
+export function beginPromptDraftSend(key: string): void {
+  sendsInFlight.add(key);
+}
+
+/** Ends a send and lets composers on `key` pick up a draft it handed back. */
+export function endPromptDraftSend(key: string): void {
+  sendsInFlight.delete(key);
+  draftListeners.get(key)?.forEach((listener) => listener());
+}
+
+/** Whether a send of `key`'s draft is still running in this page; false after a reload. */
+export function isPromptDraftSendInFlight(key: string): boolean {
+  return sendsInFlight.has(key);
+}
+
+export function subscribeToPromptDraft(key: string, listener: () => void): () => void {
+  const listeners = draftListeners.get(key) ?? new Set<() => void>();
+  listeners.add(listener);
+  draftListeners.set(key, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) draftListeners.delete(key);
+  };
+}
 
 export function promptDraftStorageKey(userId: string, draftId: string): string {
   return `${PROMPT_DRAFT_STORAGE_KEY_PREFIX}${userId}:${draftId}`;

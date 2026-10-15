@@ -193,6 +193,30 @@ describe("Home: leaving mid-send (#2336)", () => {
     await settle();
   });
 
+  it("shows a failed send's text in the composer the author came back to", async () => {
+    const server = fakeControlPlane({ holdPrompt: true, rejectPrompt: 503 });
+    const first = render(<Home />);
+    typePrompt();
+    await waitFor(() => expect(server.log).toContain("created session-1"));
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith("/api/sessions/session-1/prompt", expect.anything())
+    );
+    // Still stored, so a reload mid-send would find it.
+    expect(
+      readStoredPromptDraft(`open-inspect-prompt-draft:${mocks.userId}:new-session`)
+    ).toMatchObject({ prompt: "Fix the flaky test", sending: true });
+
+    first.unmount();
+    render(<Home />);
+    await settle();
+    expect(composer()).toHaveValue("");
+
+    server.promptGate.open();
+    await waitFor(() => expect(composer()).toHaveValue("Fix the flaky test"));
+  });
+
   it("hands a failed send back: the text stays stored and the draft is reused", async () => {
     const server = fakeControlPlane({ rejectPrompt: 503 });
     render(<Home />);

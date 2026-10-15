@@ -426,6 +426,18 @@ describe("DO internal sub-session routes", () => {
       expect(sandboxes.map((row) => row.status)).toEqual(["stopped"]);
     });
 
+    it("refuses to unarchive a draft it expired, since its index row is being deleted", async () => {
+      const { stub } = await initSession();
+      await stub.fetch("http://internal/internal/expire-draft", { method: "POST" });
+
+      const res = await stub.fetch("http://internal/internal/unarchive", { method: "POST" });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: "A discarded draft cannot be restored" });
+      const rows = await queryDO<{ status: string }>(stub, "SELECT status FROM session LIMIT 1");
+      expect(rows[0].status).toBe("archived");
+    });
+
     it("spares a session that started work after the sweep selected it", async () => {
       const { stub } = await initSession();
       // The sweep reads candidates from D1, so the session may have been

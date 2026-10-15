@@ -3,8 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuthSession } from "@/lib/auth-session";
 import {
+  beginPromptDraftSend,
+  endPromptDraftSend,
+  isPromptDraftSendInFlight,
   promptDraftStorageKey,
   readStoredPromptDraft,
+  subscribeToPromptDraft,
   writeStoredPromptDraft,
 } from "@/lib/prompt-drafts";
 import type { PromptRequestIdentity } from "@/lib/prompt-request-id";
@@ -40,15 +44,38 @@ export function usePromptDraft(draftId: string) {
     }
     if (!storageKey) return;
     const stored = readStoredPromptDraft(storageKey);
-    if (stored) {
+    if (stored?.sending && isPromptDraftSendInFlight(storageKey)) {
+      // Another composer in this page is still sending it; offering it here
+      // could start a second session. A failed send hands it back below.
+    } else if (stored) {
       promptRef.current = stored.prompt;
       setPromptState(stored.prompt);
       pendingRequestRef.current = stored.pendingRequest;
+      // A send the page was reloaded during has no outcome to wait for here.
+      if (stored.sending) {
+        writeStoredPromptDraft(storageKey, {
+          prompt: stored.prompt,
+          pendingRequest: stored.pendingRequest,
+        });
+      }
     } else if (promptRef.current) {
       // Keep text typed before the user was known instead of discarding it.
       writeStoredPromptDraft(storageKey, { prompt: promptRef.current, pendingRequest: null });
     }
   }, [draftId, storageKey, userId]);
+
+  // Picks up a prompt a failed send handed back while this composer was empty.
+  useEffect(() => {
+    if (!storageKey) return;
+    return subscribeToPromptDraft(storageKey, () => {
+      if (promptRef.current) return;
+      const stored = readStoredPromptDraft(storageKey);
+      if (!stored || stored.sending) return;
+      promptRef.current = stored.prompt;
+      setPromptState(stored.prompt);
+      pendingRequestRef.current = stored.pendingRequest;
+    });
+  }, [storageKey]);
 
   const setPendingRequest = useCallback(
     (identity: PromptRequestIdentity | null) => {
@@ -87,20 +114,23 @@ export function usePromptDraft(draftId: string) {
       if (storageKey && readStoredPromptDraft(storageKey)?.prompt === submitted) {
         writeStoredPromptDraft(storageKey, null);
       }
+      if (storageKey) endPromptDraftSend(storageKey);
     },
     [storageKey]
   );
 
   /**
-   * Stops persisting a prompt while its send is in flight, so a composer that
-   * mounts meanwhile (the author came back mid-send) does not offer it again
-   * and start a second session. The text stays on screen in this composer.
+   * Marks a prompt as submitted. It stays stored until the send's outcome is
+   * known, so a reload mid-send can offer it again, while a composer mounted
+   * meanwhile in this page leaves it out rather than start a second session.
    */
-  const unstoreSubmittedPrompt = useCallback(
+  const markPromptSending = useCallback(
     (submitted: string) => {
-      if (storageKey && readStoredPromptDraft(storageKey)?.prompt === submitted) {
-        writeStoredPromptDraft(storageKey, null);
-      }
+      if (!storageKey) return;
+      const stored = readStoredPromptDraft(storageKey);
+      if (stored?.prompt === submitted)
+        writeStoredPromptDraft(storageKey, { ...stored, sending: true });
+      beginPromptDraftSend(storageKey);
     },
     [storageKey]
   );
@@ -111,9 +141,12 @@ export function usePromptDraft(draftId: string) {
    */
   const restoreUnsentPrompt = useCallback(
     (unsent: string) => {
-      if (storageKey && !readStoredPromptDraft(storageKey)) {
+      if (!storageKey) return;
+      const stored = readStoredPromptDraft(storageKey);
+      if (!stored || (stored.sending && stored.prompt === unsent)) {
         writeStoredPromptDraft(storageKey, { prompt: unsent, pendingRequest: null });
       }
+      endPromptDraftSend(storageKey);
     },
     [storageKey]
   );
@@ -123,7 +156,7 @@ export function usePromptDraft(draftId: string) {
     promptRef,
     setPrompt,
     clearSubmittedPrompt,
-    unstoreSubmittedPrompt,
+    markPromptSending,
     restoreUnsentPrompt,
     pendingRequestRef,
     setPendingRequest,

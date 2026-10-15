@@ -144,7 +144,10 @@ export function useWarmDraftSession(
         });
         if (!response.ok) {
           const failure: unknown = await response.json().catch(() => null);
-          if (!pending.claimed && !isCurrent()) return null;
+          // The error state describes the current launch: a claimant whose
+          // launch was superseded gets null and reports the failure itself,
+          // so its refusal cannot block the new target's sends.
+          if (!isCurrent()) return null;
           let message = "Failed to create session";
           let code: string | null = null;
           if (failure && typeof failure === "object") {

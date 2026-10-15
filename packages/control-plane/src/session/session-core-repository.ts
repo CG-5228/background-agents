@@ -163,6 +163,19 @@ export class SessionCoreRepository {
     );
   }
 
+  /** Marks a draft as discarded: its index row is about to be deleted. */
+  markSessionDiscarded(sessionId: string, discardedAt: number): void {
+    this.sql.exec(`UPDATE session SET discarded_at = ? WHERE id = ?`, discardedAt, sessionId);
+  }
+
+  isSessionDiscarded(sessionId: string): boolean {
+    return (
+      this.sql
+        .exec(`SELECT 1 FROM session WHERE id = ? AND discarded_at IS NOT NULL`, sessionId)
+        .toArray().length > 0
+    );
+  }
+
   updateSessionModel(sessionId: string, model: string, reasoningEffort: string | null): void {
     this.sql.exec(
       `UPDATE session SET model = ?, reasoning_effort = ? WHERE id = ?`,

@@ -193,6 +193,11 @@ export class SessionLifecycleHandler {
    * work, and a composer discard arrives seconds after the warm spawn, when the
    * sandbox would otherwise idle until its inactivity timeout.
    *
+   * An `archived` answer is final: the caller deletes the session's index row
+   * next, so the draft is marked discarded in the same turn and `unarchive`
+   * refuses it. Otherwise an unarchive landing between this answer and the
+   * delete would leave a restored session with no index row.
+   *
    * The sweep selects candidates from the D1 index, which it may have read
    * before a prompt arrived. Re-checking here is what makes that safe: the
    * Durable Object is the authority on the session's own state and runs
@@ -232,6 +237,7 @@ export class SessionLifecycleHandler {
       return Response.json({ outcome: "has_work", status: settled });
     }
 
+    this.sessionCoreRepository.markSessionDiscarded(session.id, Date.now());
     await this.statusService.transition("archived");
     await this.sandboxLifecycle.cancelSandbox();
 
@@ -247,6 +253,10 @@ export class SessionLifecycleHandler {
 
     if (session.status !== "archived") {
       return Response.json({ error: "Session is not archived" }, { status: 409 });
+    }
+
+    if (this.sessionCoreRepository.isSessionDiscarded(session.id)) {
+      return Response.json({ error: "A discarded draft cannot be restored" }, { status: 409 });
     }
 
     // Restoring, not starting: unarchive returns the session to whatever its

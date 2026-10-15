@@ -178,7 +178,7 @@ export default function Home() {
   });
   const [modelPreferenceDraft, setModelPreferenceDraft] = useState<ModelPreference | null>(null);
   const [harness, setHarness] = useState<HarnessId>(DEFAULT_HARNESS);
-  const { prompt, setPrompt, clearSubmittedPrompt, unstoreSubmittedPrompt, restoreUnsentPrompt } =
+  const { prompt, setPrompt, clearSubmittedPrompt, markPromptSending, restoreUnsentPrompt } =
     usePromptDraft(NEW_SESSION_PROMPT_DRAFT_ID);
   const [warmRequested, setWarmRequested] = useState(false);
   const [skillSelection, setSkillSelection] = useState<SessionSkillSelection>({ mode: "all" });
@@ -409,9 +409,10 @@ export default function Home() {
 
     const launchIdentity = warmIdentity;
     const submittedPrompt = prompt;
-    // Until the send is confirmed, a composer mounted elsewhere must not offer
-    // this text again; it is handed back if the send fails.
-    unstoreSubmittedPrompt(submittedPrompt);
+    // Until the send is confirmed, a composer mounted meanwhile must not offer
+    // this text again; it is handed back if the send fails, and a reload
+    // mid-send still finds it stored.
+    markPromptSending(submittedPrompt);
     let sessionId: string | null = null;
     let sent = false;
     try {

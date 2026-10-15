@@ -680,3 +680,38 @@ describe("useWarmDraftSession claims", () => {
     expect(discardWarmDraftSession).toHaveBeenCalledWith("session-1");
   });
 });
+
+describe("useWarmDraftSession superseded claims", () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it("keeps a superseded claim's refusal out of the new target's error state", async () => {
+    let resolveCreate: ((response: Response) => void) | undefined;
+    vi.mocked(browserApiFetch).mockImplementationOnce(
+      () => new Promise<Response>((resolve) => (resolveCreate = resolve))
+    );
+    const { result, rerender } = renderHook(
+      ({ launchRequest }) => useWarmDraftSession(launchRequest),
+      { initialProps: { launchRequest: request() } }
+    );
+    let claiming: Promise<string | null> | undefined;
+    act(() => {
+      claiming = result.current.claim();
+    });
+
+    rerender({ launchRequest: otherRepository() });
+    resolveCreate?.(
+      Response.json({ error: "Forbidden", code: "not_team_member" }, { status: 403 })
+    );
+    await act(async () => {
+      await expect(claiming).resolves.toBeNull();
+    });
+
+    expect(result.current.error).toBeNull();
+    vi.mocked(browserApiFetch).mockResolvedValueOnce(
+      Response.json({ sessionId: "session-2", status: "created" })
+    );
+    await act(async () => {
+      await expect(result.current.warm()).resolves.toBe("session-2");
+    });
+  });
+});

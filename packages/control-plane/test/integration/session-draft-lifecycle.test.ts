@@ -6,6 +6,7 @@ import { seedActiveUser, serviceFetch } from "./helpers";
 
 const BASE = "https://test.local";
 const STRANGER = "33333333333333333333333333333333";
+const TEAMMATE = "44444444444444444444444444444444";
 
 function request(path: string, method = "GET", body?: object, as?: string) {
   return serviceFetch(`${BASE}${path}`, {
@@ -91,6 +92,27 @@ describe("POST /sessions/:id/discard-draft", () => {
     expect(response.status).toBe(404);
   });
 
+  it("lets only the draft's creator discard it, even with lifecycle access", async () => {
+    await seedActiveUser(TEAMMATE);
+    const sessionId = await createDraft();
+
+    const response = await request(
+      `/sessions/${sessionId}/discard-draft`,
+      "POST",
+      undefined,
+      TEAMMATE
+    );
+
+    expect(response.status).toBe(403);
+    expect(await new SessionIndexStore(env.DB).get(sessionId)).not.toBeNull();
+    // The draft is still a draft its creator can use.
+    const prompted = await request(`/sessions/${sessionId}/prompt`, "POST", {
+      content: "Still mine",
+      source: "web",
+    });
+    expect(prompted.status).toBe(200);
+  });
+
   it("authorizes exactly like archive", async () => {
     await seedActiveUser(STRANGER);
     const sessionId = await createDraft({ visibility: "private" });
@@ -160,6 +182,25 @@ describe("first prompt into a draft", () => {
       model: "anthropic/claude-haiku-4-5",
     });
     expect(await sessionModel(sessionId)).toBe("anthropic/claude-opus-4-6");
+  });
+
+  it("keeps the draft's reasoning effort when the first prompt names a model but no effort", async () => {
+    const sessionId = await createDraft({ reasoningEffort: "high" });
+
+    await request(`/sessions/${sessionId}/prompt`, "POST", {
+      content: "First",
+      source: "web",
+      model: "anthropic/claude-opus-4-6",
+    });
+
+    const response = await request(`/sessions/${sessionId}`);
+    const snapshot = await response.json<{
+      session: { model: string; reasoningEffort?: string };
+    }>();
+    expect(snapshot.session).toMatchObject({
+      model: "anthropic/claude-opus-4-6",
+      reasoningEffort: "high",
+    });
   });
 
   it("keeps the draft's model when the first prompt names none", async () => {

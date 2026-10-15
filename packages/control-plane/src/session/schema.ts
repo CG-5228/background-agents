@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS session (
   max_cost_usd REAL,                                -- Mutable effective session cost limit; NULL = unlimited
   budget_exhausted INTEGER NOT NULL DEFAULT 0,      -- Pauses prompt admission and dispatch
   environment_id TEXT,                              -- Launch environment provenance; NULL for repo-launched/ad-hoc sessions
+  discarded_at INTEGER,                             -- Set when an unprompted draft is discarded; never unarchived
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   CHECK (
@@ -758,6 +759,11 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     id: 56,
     description: "Retain rejected sandbox startup cleanup intent",
     run: "ALTER TABLE sandbox ADD COLUMN startup_rejected INTEGER NOT NULL DEFAULT 0",
+  },
+  {
+    id: 57,
+    description: "Fence discarded drafts against unarchive",
+    run: "ALTER TABLE session ADD COLUMN discarded_at INTEGER",
   },
 ];
 

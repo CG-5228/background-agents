@@ -321,6 +321,9 @@ function lifecycleProxy(internalPath: SessionInternalPath): ProxyHandler {
  * draft comes back unchanged as `not_draft` or `has_work`. That is what lets the
  * composer call it whenever a draft is abandoned without racing a send. A
  * discarded draft's index row is deleted, so it never appears in a list.
+ *
+ * Deleting cannot be undone, so only the draft's creator may do it; lifecycle
+ * access alone would let any member discard another member's visible draft.
  */
 async function handleDiscardDraft(
   _request: Request,
@@ -328,6 +331,12 @@ async function handleDiscardDraft(
   params: SessionParams,
   ctx: SessionRouteContext
 ): Promise<Response> {
+  const row = ctx.sessionAdmission?.row ?? (await new SessionIndexStore(ctx.db).get(params.id));
+  if (!row) return error("Session not found", 404);
+  if (!row.userId || row.userId !== ctx.authorization?.userId) {
+    return json({ error: "Only the session's creator can discard its draft" }, 403);
+  }
+
   const outcome = await new SessionDraftExpiryClient(ctx.sessionRuntime).expireDraft(params.id);
   if (outcome === "missing") return error("Session not found", 404);
   if (outcome !== "archived") return json({ outcome });
