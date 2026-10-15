@@ -113,6 +113,102 @@ describe("RepoClassifier", () => {
     mockBuildRepoDescriptions.mockReturnValue("- acme/prod\n- acme/web");
   });
 
+  it("classifies with global ChatGPT OAuth through the control plane without a provider key", async () => {
+    const decision = {
+      targetId: "acme/prod",
+      confidence: "high",
+      reasoning: "The production service is named.",
+      alternatives: [],
+    };
+    const controlPlaneFetch = vi.fn().mockResolvedValue(Response.json(decision));
+    const providerFetch = vi.fn();
+    vi.stubGlobal("fetch", providerFetch);
+    try {
+      const classifier = new RepoClassifier({
+        CLASSIFICATION_MODEL: "openai/gpt-5.6-luna",
+        CLASSIFICATION_OPENAI_AUTH: "oauth",
+        SERVICE_AUTH_SECRET: "test-service-secret",
+        CONTROL_PLANE: { fetch: controlPlaneFetch },
+      } as unknown as Env);
+
+      const result = await classifier.classify("fix prod alerts", undefined, "trace-oauth");
+
+      expect(classifiedRepoFullName(result)).toBe("acme/prod");
+      expect(result.needsClarification).toBe(false);
+      expect(controlPlaneFetch).toHaveBeenCalledOnce();
+      const request = new Request(...(controlPlaneFetch.mock.calls[0] as [string, RequestInit]));
+      expect(new URL(request.url).pathname).toBe("/slack/target-classifications");
+      expect(request.headers.get("X-OpenInspect-Service-Signature")).toMatch(/^sig1\./);
+      expect(await request.json()).toEqual({ prompt: expect.stringContaining("fix prod alerts") });
+      expect(providerFetch).not.toHaveBeenCalled();
+      expect(Anthropic).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    {
+      name: "routing rule ahead of channel association",
+      rules: [{ keyword: "frontend", target: "acme/web" }],
+      expected: "acme/web",
+      source: "routing_rule",
+    },
+    {
+      name: "channel association ahead of OAuth",
+      rules: [],
+      expected: "acme/prod",
+      source: "channel_association",
+    },
+  ])("keeps $name", async ({ rules, expected, source }) => {
+    mockGetRoutingRules.mockResolvedValue(rules);
+    mockGetAvailableRepos.mockResolvedValue([
+      { ...TEST_REPOS[0], channelAssociations: ["C123"] },
+      TEST_REPOS[1],
+    ]);
+    const controlPlaneFetch = vi.fn();
+    const classifier = new RepoClassifier({
+      CLASSIFICATION_MODEL: "openai/gpt-5.6-luna",
+      CLASSIFICATION_OPENAI_AUTH: "oauth",
+      CONTROL_PLANE: { fetch: controlPlaneFetch },
+    } as unknown as Env);
+    const result = await classifier.classify("fix frontend", { channelId: "C123" });
+    expect(classifiedRepoFullName(result)).toBe(expected);
+    expect(result.source).toBe(source);
+    expect(controlPlaneFetch).not.toHaveBeenCalled();
+    expect(Anthropic).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "unavailable OAuth",
+      response: () => new Response("private-upstream-body", { status: 503 }),
+    },
+    { name: "malformed decision", response: () => Response.json({ targetId: "acme/prod" }) },
+    {
+      name: "inaccessible target",
+      response: () =>
+        Response.json({
+          targetId: "other/private",
+          confidence: "high",
+          reasoning: "A target outside the catalog.",
+          alternatives: [],
+        }),
+    },
+  ])("offers the picker for $name", async ({ response }) => {
+    const classifier = new RepoClassifier({
+      CLASSIFICATION_MODEL: "openai/gpt-5.6-luna",
+      CLASSIFICATION_OPENAI_AUTH: "oauth",
+      SERVICE_AUTH_SECRET: "test-service-secret",
+      CONTROL_PLANE: { fetch: vi.fn().mockResolvedValue(response()) },
+    } as unknown as Env);
+    const result = await classifier.classify("fix prod alerts");
+    expect(result.target).toBeNull();
+    expect(result.needsClarification).toBe(true);
+    expect(result.reasoning).not.toContain("private-upstream-body");
+    expect(Anthropic).not.toHaveBeenCalled();
+  });
+
   it("uses tool output when provider returns valid structured classification", async () => {
     mockMessagesCreate.mockResolvedValue({
       content: [
