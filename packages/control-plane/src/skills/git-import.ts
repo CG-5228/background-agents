@@ -565,9 +565,11 @@ export async function fetchBulkSkillImport(
     );
   }
   for (const root of roots) {
-    if (root && !skillImportSubdirectoryValueSchema.safeParse(root).success) {
+    if (!root) continue;
+    const parsed = skillImportSubdirectoryValueSchema.safeParse(root);
+    if (!parsed.success || parsed.data !== root) {
       throw new SkillImportError(
-        `Discovered skill root ${root} is not a safe relative POSIX path inside the repository`,
+        `Discovered skill root ${JSON.stringify(root)} is not a safe relative POSIX path inside the repository (no leading or trailing whitespace allowed)`,
         400
       );
     }

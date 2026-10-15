@@ -601,6 +601,20 @@ describe("fetchBulkSkillImport", () => {
     expect((error as SkillImportError).message).toMatch(/not a safe relative POSIX path/);
   });
 
+  it("rejects discovered roots that change when parsed before reading blobs", async () => {
+    const root = "catalog/deploy ";
+    const blobLimits: number[] = [];
+    const provider = fakeProvider({ [`${root}/SKILL.md`]: { content: SKILL_MD } }, { blobLimits });
+
+    await expect(
+      fetchBulkSkillImport(provider, source({ subdirectory: "catalog" }))
+    ).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining("leading or trailing whitespace"),
+    });
+    expect(blobLimits).toEqual([]);
+  });
+
   it("rejects the aggregate file limit before reading blobs", async () => {
     const blobLimits: number[] = [];
     const files: Record<string, FakeFile> = {};
