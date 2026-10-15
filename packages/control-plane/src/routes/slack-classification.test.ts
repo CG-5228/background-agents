@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SLACK_CLASSIFICATION_MAX_PROMPT_LENGTH,
-  SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS,
+  SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS,
 } from "@open-inspect/shared/slack-classification";
 import { ScopedOAuthSecretsStore } from "../db/scoped-oauth-secrets";
 import { ProviderDefaultStore } from "../db/provider-account-defaults";
@@ -89,6 +89,14 @@ describe("Slack global OAuth classification route", () => {
       store: false,
       stream: true,
     });
+  });
+
+  it("accepts a complete prompt at the documented limit without truncation", async () => {
+    const prompt = "x".repeat(SLACK_CLASSIFICATION_MAX_PROMPT_LENGTH);
+    const response = await handle(await request({ prompt }), env, TEST_BACKGROUND_TASK_CONTEXT);
+    expect(response.status).toBe(200);
+    const [, init] = upstream.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body)).input[0].content[0].text).toBe(prompt);
   });
 
   it("uses the installation default ChatGPT account from the current managed OAuth flow", async () => {
@@ -214,7 +222,7 @@ describe("Slack global OAuth classification route", () => {
       .mockReturnValue(new Promise(() => undefined));
     const operation = handle(signed, env, TEST_BACKGROUND_TASK_CONTEXT);
     await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
-    await vi.advanceTimersByTimeAsync(SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS);
     expect((await operation).status).toBe(502);
     expect(upstream).not.toHaveBeenCalled();
   });

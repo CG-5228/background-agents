@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import {
   OPENAI_SLACK_CLASSIFICATION_MODEL,
-  SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS,
+  SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS,
   SLACK_CLASSIFICATION_TOOL,
   slackClassificationDecisionSchema,
   slackClassificationRequestSchema,
@@ -68,7 +68,7 @@ async function classify(
   try {
     // Classification precedes target selection: never resolve repo, environment,
     // team, or user credentials here. Tokens stay inside the control plane.
-    const deadlineAt = Date.now() + SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS;
+    const deadlineAt = Date.now() + SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS;
     const token = await withinProviderAccessDeadline(
       globalOpenAIToken(env, ctx, deadlineAt),
       deadlineAt

@@ -1,7 +1,7 @@
 import { waitForAbort } from "./bounded-json-sse";
 import { OpenAICodexUpstreamError } from "./codex-errors";
 import { parseOpenAIResponsesStream } from "./responses-stream";
-import { SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS } from "@open-inspect/shared/slack-classification";
+import { SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS } from "@open-inspect/shared/slack-classification";
 import type { FetchClient } from "../platform-ports";
 
 const CODEX_SUBSCRIPTION_RESPONSES_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
@@ -58,7 +58,7 @@ export async function requestOpenAICodexFunction(
   const abortController = new AbortController();
   const timeoutMs =
     request.deadlineAt === undefined
-      ? SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS
+      ? SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS
       : Math.max(0, request.deadlineAt - Date.now());
   const timeoutHandle = setTimeout(() => abortController.abort(), timeoutMs);
   try {

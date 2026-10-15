@@ -2,8 +2,13 @@ import { z } from "zod";
 
 export const OPENAI_SLACK_CLASSIFICATION_MODEL = "openai/gpt-5.6-luna";
 export const NO_REPOSITORY_TARGET_VALUE = "__no_repository__";
-export const SLACK_CLASSIFICATION_MAX_PROMPT_LENGTH = 64 * 1024;
+// Accommodate complete catalogs of thousands of described targets. JSON
+// escaping still fits below the signed service request's byte cap.
+export const SLACK_CLASSIFICATION_MAX_PROMPT_LENGTH = 1024 * 1024;
 export const SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS = 30_000;
+// Reserve caller time for signing, admission, transit, and response delivery.
+export const SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS =
+  SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS - 5_000;
 
 export const slackClassificationRequestSchema = z
   .object({

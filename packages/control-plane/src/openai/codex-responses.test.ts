@@ -1,4 +1,4 @@
-import { SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS } from "@open-inspect/shared/slack-classification";
+import { SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS } from "@open-inspect/shared/slack-classification";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { requestOpenAICodexFunction, type OpenAICodexFunctionRequest } from "./codex-responses";
 import { InvalidOpenAICodexResponseError, OpenAICodexUpstreamError } from "./codex-errors";
@@ -259,7 +259,7 @@ describe("OpenAI Codex Responses client", () => {
     const result = request();
     const rejection = expect(result).rejects.toBeInstanceOf(OpenAICodexUpstreamError);
     await vi.waitFor(() => expect(mockEgressFetch).toHaveBeenCalledOnce());
-    await vi.advanceTimersByTimeAsync(SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS);
 
     await rejection;
     expect(cancel).toHaveBeenCalledOnce();
@@ -272,7 +272,7 @@ describe("OpenAI Codex Responses client", () => {
     const result = request();
     const rejection = expect(result).rejects.toBeInstanceOf(OpenAICodexUpstreamError);
     await vi.waitFor(() => expect(mockEgressFetch).toHaveBeenCalledOnce());
-    await vi.advanceTimersByTimeAsync(SLACK_OAUTH_CLASSIFICATION_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS);
 
     await rejection;
     expect(mockEgressFetch.mock.calls[0][1]?.signal?.aborted).toBe(true);

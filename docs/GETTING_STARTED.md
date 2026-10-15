@@ -1075,13 +1075,18 @@ validated classification result and no provider token or API key. Routing rules 
 associations still run before the LLM. Linear retains `classification_model` and its credentials; if
 Linear uses Anthropic, its classifier still requires an Anthropic key.
 
+OAuth classification accepts the complete prompt up to 1,048,576 UTF-16 code units, including the
+repository/environment catalog, message, and thread context. No targets or context are truncated to
+fit. Larger prompts use the target picker; the model's context limit also applies.
+
 This option adds an `EGRESS` Workers VPC Network binding on the control plane using `cf1:network`.
 The deployment's Cloudflare API token needs **Connectivity Directory Bind** permission, and
 [Workers VPC network access](https://developers.cloudflare.com/workers-vpc/configuration/vpc-networks/)
-must permit reaching `chatgpt.com` through Gateway. Direct Worker requests to ChatGPT can be blocked
-by its edge protection; the classifier requires the egress binding and never substitutes direct
-Worker fetch. Verify a deployed Slack classification with your account after configuring egress. The
-Node control-plane host does not supply this VPC binding.
+requires an active Cloudflare Tunnel, Mesh node, or WAN on-ramp that can reach the target services,
+as well as Gateway routing and policy permitting `chatgpt.com`. Direct Worker requests to ChatGPT
+can be blocked by its edge protection; the classifier requires the egress binding and never
+substitutes direct Worker fetch. Verify a deployed Slack classification with your account after
+configuring egress. The Node control-plane host does not supply this VPC binding.
 
 Leave `slack_classification_model` blank to inherit the existing classifier configuration (Claude
 Haiku by default), or set `anthropic/claude-haiku-4-5` to select Haiku for Slack explicitly.
