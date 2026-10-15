@@ -4,6 +4,7 @@ import { browserApiFetch } from "@/lib/browser-api-fetch";
 import type {
   OpencodePlugin,
   OpencodePluginInput,
+  OpencodePluginUpdate,
 } from "@open-inspect/shared/types/opencode-plugins";
 
 const KEY = "/api/opencode-plugins";
@@ -12,7 +13,12 @@ export function useOpencodePlugins() {
   const { data, isLoading, error, mutate } = useSWR<OpencodePlugin[]>(session ? KEY : null);
   return { plugins: data ?? [], loading: isLoading, error, mutate };
 }
-export async function saveOpencodePlugin(input: OpencodePluginInput, id?: string): Promise<void> {
+export function saveOpencodePlugin(input: OpencodePluginInput): Promise<void>;
+export function saveOpencodePlugin(input: OpencodePluginUpdate, id: string): Promise<void>;
+export async function saveOpencodePlugin(
+  input: OpencodePluginInput | OpencodePluginUpdate,
+  id?: string
+): Promise<void> {
   const response = await browserApiFetch(id ? `${KEY}/${encodeURIComponent(id)}` : KEY, {
     method: id ? "PUT" : "POST",
     headers: { "Content-Type": "application/json" },

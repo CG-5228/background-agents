@@ -2,14 +2,28 @@ import {
   opencodePluginSchema,
   type OpencodePlugin,
   type OpencodePluginInput,
+  type OpencodePluginUpdate,
 } from "@open-inspect/shared/types/opencode-plugins";
 import type { SqlDatabase } from "./sql-database";
 
 interface PluginRow {
   id: string;
+  revision: number;
   spec: string;
   repo_scope: string | null;
   enabled: number;
+}
+
+export class OpencodePluginConflictError extends Error {}
+
+function rowToPlugin(row: PluginRow): OpencodePlugin {
+  return opencodePluginSchema.parse({
+    id: row.id,
+    revision: row.revision,
+    spec: row.spec,
+    repoScopes: row.repo_scope === null ? null : JSON.parse(row.repo_scope),
+    enabled: row.enabled === 1,
+  });
 }
 
 export class OpencodePluginStore {
@@ -19,18 +33,11 @@ export class OpencodePluginStore {
     const { results } = await this.db
       .prepare("SELECT * FROM opencode_plugins ORDER BY spec")
       .all<PluginRow>();
-    return results.map((row) =>
-      opencodePluginSchema.parse({
-        id: row.id,
-        spec: row.spec,
-        repoScopes: row.repo_scope === null ? null : JSON.parse(row.repo_scope),
-        enabled: row.enabled === 1,
-      })
-    );
+    return results.map(rowToPlugin);
   }
 
   async create(input: OpencodePluginInput): Promise<OpencodePlugin> {
-    const plugin = { ...input, id: crypto.randomUUID() };
+    const plugin = { ...input, id: crypto.randomUUID(), revision: 1 };
     await this.db
       .prepare("INSERT INTO opencode_plugins (id, spec, repo_scope, enabled) VALUES (?, ?, ?, ?)")
       .bind(
@@ -43,17 +50,33 @@ export class OpencodePluginStore {
     return plugin;
   }
 
-  async update(id: string, input: OpencodePluginInput): Promise<OpencodePlugin | null> {
-    const result = await this.db
-      .prepare("UPDATE opencode_plugins SET spec = ?, repo_scope = ?, enabled = ? WHERE id = ?")
-      .bind(
-        input.spec,
-        input.repoScopes === null ? null : JSON.stringify(input.repoScopes),
-        input.enabled ? 1 : 0,
-        id
-      )
-      .run();
-    return result.meta.changes > 0 ? { ...input, id } : null;
+  async update(id: string, input: OpencodePluginUpdate): Promise<OpencodePlugin | null> {
+    const statement =
+      "revision" in input
+        ? this.db
+            .prepare(
+              "UPDATE opencode_plugins SET spec = ?, repo_scope = ?, enabled = ?, revision = revision + 1 WHERE id = ? AND revision = ? RETURNING *"
+            )
+            .bind(
+              input.spec,
+              input.repoScopes === null ? null : JSON.stringify(input.repoScopes),
+              input.enabled ? 1 : 0,
+              id,
+              input.revision
+            )
+        : this.db
+            .prepare(
+              "UPDATE opencode_plugins SET enabled = ?, revision = revision + 1 WHERE id = ? RETURNING *"
+            )
+            .bind(input.enabled ? 1 : 0, id);
+    const row = await statement.first<PluginRow>();
+    if (row) return rowToPlugin(row);
+    if (await this.db.prepare("SELECT id FROM opencode_plugins WHERE id = ?").bind(id).first()) {
+      throw new OpencodePluginConflictError(
+        "Plugin changed. Reload the catalog before editing again."
+      );
+    }
+    return null;
   }
 
   async delete(id: string): Promise<boolean> {

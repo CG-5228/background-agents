@@ -349,7 +349,7 @@ export function SessionRightSidebarContent({
               />
             )}
             <ManagedSkillsSection sessionId={sessionState.id} />
-            <OpencodePluginsSection events={events} />
+            <OpencodePluginsSection report={sessionState?.opencodePlugins} />
             <MemoriesSection sessionId={sessionState.id} />
             {(!presenceSynced || participants.length > 0) && (
               <DetailsSection title="Participants">

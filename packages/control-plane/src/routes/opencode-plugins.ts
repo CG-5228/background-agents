@@ -1,6 +1,9 @@
 import { Hono } from "hono";
-import { opencodePluginInputSchema } from "@open-inspect/shared/types/opencode-plugins";
-import { OpencodePluginStore } from "../db/opencode-plugins";
+import {
+  opencodePluginInputSchema,
+  opencodePluginUpdateSchema,
+} from "@open-inspect/shared/types/opencode-plugins";
+import { OpencodePluginStore, OpencodePluginConflictError } from "../db/opencode-plugins";
 import { isUniqueConstraintError } from "../db/errors";
 import { admit, dispatch } from "../routing/admit";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
@@ -32,17 +35,27 @@ opencodePluginRoutes.get("/opencode-plugins", read, (c) =>
 
 async function save(request: Request, ctx: RequestContext, id?: string): Promise<Response> {
   if (!ctx.db) return error("Database not configured", 503);
-  const input = await parseBody(
-    request,
-    opencodePluginInputSchema,
-    "Invalid OpenCode plugin configuration"
-  );
-  if (input instanceof Response) return input;
   const store = new OpencodePluginStore(ctx.db);
   try {
-    const plugin = id ? await store.update(id, input) : await store.create(input);
-    return plugin ? json(plugin, id ? 200 : 201) : error("OpenCode plugin not found", 404);
+    if (id) {
+      const input = await parseBody(
+        request,
+        opencodePluginUpdateSchema,
+        "Invalid OpenCode plugin update"
+      );
+      if (input instanceof Response) return input;
+      const plugin = await store.update(id, input);
+      return plugin ? json(plugin) : error("OpenCode plugin not found", 404);
+    }
+    const input = await parseBody(
+      request,
+      opencodePluginInputSchema,
+      "Invalid OpenCode plugin configuration"
+    );
+    if (input instanceof Response) return input;
+    return json(await store.create(input), 201);
   } catch (err) {
+    if (err instanceof OpencodePluginConflictError) return error(err.message, 409);
     if (isUniqueConstraintError(err)) return error("This plugin is already configured", 409);
     throw err;
   }

@@ -26,7 +26,9 @@ vi.mock("@/hooks/use-repos", () => ({
 }));
 vi.mock("@/hooks/use-opencode-plugins", () => ({
   useOpencodePlugins: () => ({
-    plugins: [{ id: "audit", spec: "@company/audit@1.2.3", repoScopes: null, enabled: true }],
+    plugins: [
+      { id: "audit", revision: 7, spec: "@company/audit@1.2.3", repoScopes: null, enabled: true },
+    ],
     loading: false,
     mutate: mocks.mutate,
   }),
@@ -74,22 +76,18 @@ describe("OpenCode plugin settings", () => {
     await user.click(screen.getByLabelText("group/subgroup/repo"));
     await user.click(screen.getByRole("button", { name: "Save plugin" }));
     await waitFor(() =>
-      expect(mocks.save).toHaveBeenCalledWith(
-        { spec: "audit@2.0.0", repoScopes: ["group/subgroup/repo"], enabled: true },
-        undefined
-      )
+      expect(mocks.save).toHaveBeenCalledWith({
+        spec: "audit@2.0.0",
+        repoScopes: ["group/subgroup/repo"],
+        enabled: true,
+      })
     );
   });
   it("disables and deletes a plugin", async () => {
     const user = userEvent.setup();
     render(<OpencodePluginsSettings />);
     await user.click(screen.getByRole("switch"));
-    await waitFor(() =>
-      expect(mocks.save).toHaveBeenCalledWith(
-        { spec: "@company/audit@1.2.3", repoScopes: null, enabled: false },
-        "audit"
-      )
-    );
+    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith({ enabled: false }, "audit"));
     await user.click(screen.getByRole("button", { name: /Delete/ }));
     await waitFor(() => expect(mocks.remove).toHaveBeenCalledWith("audit"));
   });
@@ -109,9 +107,25 @@ it("lets a plugin manager enter nested repository scopes without repository-read
   expect(screen.getByLabelText("group/subgroup/service")).toBeChecked();
   await user.click(screen.getByRole("button", { name: "Save plugin" }));
   await waitFor(() =>
+    expect(mocks.save).toHaveBeenCalledWith({
+      spec: "audit@1.0.0",
+      enabled: true,
+      repoScopes: ["group/subgroup/service"],
+    })
+  );
+});
+
+it("includes the revision read by the full editor", async () => {
+  const user = userEvent.setup();
+  render(<OpencodePluginsSettings />);
+  await user.click(screen.getByRole("button", { name: /Edit/ }));
+  await user.clear(screen.getByLabelText("Package and exact version"));
+  await user.type(screen.getByLabelText("Package and exact version"), "audit@2.0.0");
+  await user.click(screen.getByRole("button", { name: "Save plugin" }));
+  await waitFor(() =>
     expect(mocks.save).toHaveBeenCalledWith(
-      { spec: "audit@1.0.0", enabled: true, repoScopes: ["group/subgroup/service"] },
-      undefined
+      { spec: "audit@2.0.0", enabled: true, repoScopes: null, revision: 7 },
+      "audit"
     )
   );
 });

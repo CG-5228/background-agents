@@ -9,8 +9,10 @@ immediately.
 
 Viewing the catalog requires `opencode_plugins.read`; mutations require `opencode_plugins.manage`.
 Owners and Administrators can manage plugins by default, while Members and Viewers can read the
-catalog. Managers can enter repository names directly without repository-read permission. Only the
-OpenCode harness consumes this configuration; Claude and native Codex ignore it.
+catalog. Full editor saves require the revision read by the editor and reject stale edits with HTTP
+409; switches update only `enabled` and advance the revision. Managers can enter repository names
+directly without repository-read permission. Only the OpenCode harness consumes this configuration;
+Claude and native Codex ignore it.
 
 Plugins are trusted executable code. They receive the session's credentials and network access. Only
 install packages you trust. Use the existing global, repository, environment, or team secrets for
@@ -34,15 +36,16 @@ the entire managed selection omitted. Per-repository plugins are outside this fa
 
 Skipped plugins produce session warnings. The session sidebar shows the latest boot's managed plugin
 list and its loading, loaded, or skipped status. The supervisor event channel remains live after
-readiness; reconnecting bridges replay the latest plugin snapshot. “Loaded” means the registry
-initialized without a reported load error, not that all of a plugin's later hooks will succeed.
-Arbitrary plugin code can crash or block the process after startup; this is not a security or
-process isolation boundary.
+readiness; reconnecting bridges replay the latest plugin snapshot. The control plane persists that
+report separately from conversation history and clears it when reserving a new sandbox boot.
+“Loaded” means the registry initialized without a reported load error, not that all of a plugin's
+later hooks will succeed. Arbitrary plugin code can crash or block the process after startup; this
+is not a security or process isolation boundary.
 
 ## Deployment and limits
 
-Apply D1 migration `0089_opencode_plugins.sql`, deploy the control plane and web, and rebuild
-sandbox images with the updated runtime. A matching plugin selection requires at least
+Apply D1 migrations through `0090_opencode_plugin_revisions.sql`, deploy the control plane and web,
+and rebuild sandbox images with the updated runtime. A matching plugin selection requires at least
 `minimumOpencodePluginsGeneration` from the runtime manifest. Older prebuilds are skipped in favor
 of the current base image. Restoring an older snapshot with matching plugins is held without
 replacing its saved state; disable the matching plugins or recover it using an upgraded runtime.

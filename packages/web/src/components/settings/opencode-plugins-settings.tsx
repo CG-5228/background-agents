@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import {
   opencodePluginInputSchema,
   type OpencodePlugin,
+  type OpencodePluginInput,
 } from "@open-inspect/shared/types/opencode-plugins";
 import {
   useOpencodePlugins,
@@ -20,7 +21,8 @@ import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { RadioCard } from "@/components/ui/form-controls";
 
-type Draft = { id?: string; spec: string; enabled: boolean; repoScopes: string[] | null };
+type Draft = OpencodePluginInput &
+  ({ kind: "new" } | { kind: "existing"; id: string; revision: number });
 
 export function OpencodePluginsSettings() {
   const { plugins, loading, error, mutate } = useOpencodePlugins();
@@ -51,7 +53,11 @@ export function OpencodePluginsSettings() {
     setSaving(true);
     setFormError(null);
     try {
-      await saveOpencodePlugin(parsed.data, draft.id);
+      if (draft.kind === "existing") {
+        await saveOpencodePlugin({ ...parsed.data, revision: draft.revision }, draft.id);
+      } else {
+        await saveOpencodePlugin(parsed.data);
+      }
       await mutate();
       setDraft(null);
       toast.success("Plugin saved");
@@ -65,10 +71,7 @@ export function OpencodePluginsSettings() {
   async function toggle(plugin: OpencodePlugin) {
     setSaving(true);
     try {
-      await saveOpencodePlugin(
-        { spec: plugin.spec, repoScopes: plugin.repoScopes, enabled: !plugin.enabled },
-        plugin.id
-      );
+      await saveOpencodePlugin({ enabled: !plugin.enabled }, plugin.id);
       await mutate();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update plugin");
@@ -97,7 +100,7 @@ export function OpencodePluginsSettings() {
           <Button
             disabled={saving || draft !== null}
             onClick={() => {
-              setDraft({ spec: "", enabled: true, repoScopes: null });
+              setDraft({ kind: "new", spec: "", enabled: true, repoScopes: null });
               setFormError(null);
             }}
           >
@@ -261,7 +264,7 @@ export function OpencodePluginsSettings() {
                     variant="outline"
                     disabled={saving || draft !== null}
                     onClick={() => {
-                      setDraft(plugin);
+                      setDraft({ ...plugin, kind: "existing" });
                       setFormError(null);
                     }}
                   >

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as OpencodePluginStoreModule from "../db/opencode-plugins";
 import type * as AuthenticateModule from "../auth/authenticate";
 import type { Env } from "../types";
 import {
@@ -20,7 +21,8 @@ vi.mock("../auth/authenticate", async (importOriginal) => ({
   ...(await importOriginal<typeof AuthenticateModule>()),
   authenticate: mocks.authenticate,
 }));
-vi.mock("../db/opencode-plugins", () => ({
+vi.mock("../db/opencode-plugins", async (importOriginal) => ({
+  ...(await importOriginal<typeof OpencodePluginStoreModule>()),
   OpencodePluginStore: vi.fn().mockImplementation(function () {
     return { list: mocks.list, create: mocks.create, update: mocks.update, delete: mocks.remove };
   }),
@@ -47,7 +49,7 @@ describe("SCM-agnostic plugin admission", () => {
       new Request(`https://test.local${path}`, {
         method,
         ...(["POST", "PUT"].includes(method)
-          ? { body: JSON.stringify({ spec: plugin.spec }) }
+          ? { body: JSON.stringify(method === "PUT" ? { enabled: false } : { spec: plugin.spec }) }
           : {}),
       }),
       { ...TEST_SERVICE_SECRETS, SCM_PROVIDER: "gitlab", DB: ownerAuthorizationDatabase() } as Env,

@@ -96,14 +96,17 @@ export const sandboxGenerationSchema = z.object({
   createdAt: z.number().int().positive(),
 });
 
+export const opencodePluginReportSchema = sandboxEventBaseSchema.extend({
+  type: z.literal("opencode_plugins"),
+  bootSeq: z.number().int().optional(),
+  plugins: z.array(
+    z.object({ spec: z.string(), status: z.enum(["pending", "loaded", "skipped"]) })
+  ),
+});
+export type OpencodePluginReport = z.infer<typeof opencodePluginReportSchema>;
+
 const nonArtifactSandboxEventSchemas = [
-  sandboxEventBaseSchema.extend({
-    type: z.literal("opencode_plugins"),
-    bootSeq: z.number().int().optional(),
-    plugins: z.array(
-      z.object({ spec: z.string(), status: z.enum(["pending", "loaded", "skipped"]) })
-    ),
-  }),
+  opencodePluginReportSchema,
   sandboxEventBaseSchema.extend({
     type: z.literal("heartbeat"),
   }),

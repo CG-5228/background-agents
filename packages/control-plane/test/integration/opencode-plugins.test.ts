@@ -23,6 +23,7 @@ describe("Workspace OpenCode plugins", () => {
       method: "PUT",
       body: JSON.stringify({
         spec: plugin.spec,
+        revision: plugin.revision,
         enabled: false,
         repoScopes: ["Group/Subgroup/Repo"],
       }),
@@ -39,7 +40,7 @@ describe("Workspace OpenCode plugins", () => {
       (
         await serviceFetch(`${URL}/${plugin.id}`, {
           method: "PUT",
-          body: JSON.stringify({ spec: plugin.spec }),
+          body: JSON.stringify({ enabled: true }),
         })
       ).status
     ).toBe(404);
@@ -115,7 +116,7 @@ it("audits successful plugin management without auditing catalog reads", async (
     (
       await serviceFetch(`${URL}/${plugin.id}`, {
         method: "PUT",
-        body: JSON.stringify({ spec: plugin.spec, enabled: false }),
+        body: JSON.stringify({ enabled: false }),
       })
     ).status
   ).toBe(200);
@@ -129,4 +130,45 @@ it("audits successful plugin management without auditing catalog reads", async (
   expect(metadata.map((row) => row.httpMethod).sort()).toEqual(["DELETE", "POST", "PUT"]);
   expect(metadata.every((row) => row.requiredPermission === "opencode_plugins.manage")).toBe(true);
   expect(metadata.map((row) => row.httpStatus).sort()).toEqual([200, 200, 201]);
+});
+
+it("fences stale editors and lets a toggle change only enabled", async () => {
+  await cleanD1Tables();
+  const response = await create("audit@1.0.0");
+  const first = await response.json<OpencodePlugin>();
+  const second = (await (await serviceFetch(URL)).json<OpencodePlugin[]>())[0];
+  const replace = (input: unknown) =>
+    serviceFetch(`${URL}/${first.id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  const newer = {
+    spec: "audit@2.0.0",
+    repoScopes: ["group/private/repo"],
+    enabled: true,
+    revision: first.revision,
+  };
+  expect((await replace(newer)).status).toBe(200);
+  const currentEditor = (await (await serviceFetch(URL)).json<OpencodePlugin[]>())[0];
+  const toggle = await replace({ enabled: false });
+  expect(toggle.status).toBe(200);
+  expect(await toggle.json()).toMatchObject({ ...newer, enabled: false, revision: 3 });
+  expect(
+    (
+      await replace({
+        spec: second.spec,
+        repoScopes: second.repoScopes,
+        enabled: second.enabled,
+        revision: second.revision,
+      })
+    ).status
+  ).toBe(409);
+  expect((await replace({ ...newer, revision: currentEditor.revision })).status).toBe(409);
+  // A full replacement without a revision must not bypass concurrency checks.
+  expect((await replace({ spec: "audit@1.0.0", repoScopes: null, enabled: true })).status).toBe(
+    400
+  );
+  expect(await (await serviceFetch(URL)).json()).toEqual([
+    { ...newer, id: first.id, enabled: false, revision: 3 },
+  ]);
 });

@@ -26,6 +26,15 @@ export const opencodePluginInputSchema = z
     enabled: z.boolean().default(true),
   })
   .strict();
-export const opencodePluginSchema = opencodePluginInputSchema.extend({ id: z.string() });
+// Full edits carry the revision the editor read. A switch has authority only over enabled.
+export const opencodePluginUpdateSchema = z.union([
+  opencodePluginInputSchema.extend({ revision: z.number().int().positive() }),
+  z.object({ enabled: z.boolean() }).strict(),
+]);
+export const opencodePluginSchema = opencodePluginInputSchema.extend({
+  id: z.string(),
+  revision: z.number().int().positive(),
+});
+export type OpencodePluginUpdate = z.infer<typeof opencodePluginUpdateSchema>;
 export type OpencodePluginInput = z.infer<typeof opencodePluginInputSchema>;
 export type OpencodePlugin = z.infer<typeof opencodePluginSchema>;
