@@ -92,6 +92,7 @@ import {
   resolveRepositorySelection,
   validateSlackTriggerConfig,
   validateTargetCounts,
+  validatePayloadRepositoryConfig,
   validateTeamExecutor,
 } from "./automation-validation";
 import { isAutomationExecutionAuthorized } from "../automation/authorization-guard";
@@ -178,6 +179,12 @@ async function handleCreateAutomation(
     requestedEnvironmentIds =
       environmentSelection.kind === "replace" ? environmentSelection.environmentIds : [];
     validateTargetCounts(triggerType, requestedRepositories.length, requestedEnvironmentIds.length);
+    validatePayloadRepositoryConfig(
+      triggerType,
+      body.triggerConfig,
+      requestedRepositories.length,
+      requestedEnvironmentIds.length
+    );
   } catch (e) {
     if (e instanceof TargetSelectionError) return e.response();
     throw e;
@@ -635,6 +642,26 @@ async function handleUpdateAutomation(
       environmentSelection.kind === "replace" ? environmentSelection.environmentIds[0] : undefined,
   });
   if (environmentAuthorizationError) return environmentAuthorizationError;
+
+  const finalTriggerConfig =
+    body.triggerConfig === undefined ? existingTriggerConfig : body.triggerConfig;
+  if (finalTriggerConfig?.repositoryFromPayload) {
+    try {
+      validatePayloadRepositoryConfig(
+        existingTriggerType,
+        finalTriggerConfig,
+        selection.kind === "replace"
+          ? selection.repositories.length
+          : (await store.getRepositoriesForAutomation(id)).length,
+        environmentSelection.kind === "replace"
+          ? environmentSelection.environmentIds.length
+          : (await store.getEnvironmentsForAutomation(id)).length
+      );
+    } catch (e) {
+      if (e instanceof TargetSelectionError) return e.response();
+      throw e;
+    }
+  }
 
   // The count rules span both selections, so when EITHER is replaced they are
   // validated against the automation's FINAL state (the replacement plus the

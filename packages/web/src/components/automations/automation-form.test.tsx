@@ -1549,3 +1549,28 @@ describe("agent harness", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 });
+
+it("preserves API-configured payload repository paths when editing an automation", () => {
+  const onSubmit = vi.fn();
+  const repositoryFromPayload = { repoOwnerPath: "$.repo.owner", repoNamePath: "$.repo.name" };
+  const { container } = render(
+    <AutomationForm
+      mode="edit"
+      submitting={false}
+      onSubmit={onSubmit}
+      initialValues={{
+        name: "CI",
+        instructions: "Investigate",
+        triggerType: "webhook",
+        repositories: [],
+        environmentIds: [],
+        model: "openai/gpt-5.4",
+        triggerConfig: { conditions: [], repositoryFromPayload },
+      }}
+    />
+  );
+  fireEvent.submit(container.querySelector("form")!);
+  expect(onSubmit).toHaveBeenCalledWith(
+    expect.objectContaining({ triggerConfig: { conditions: [], repositoryFromPayload } })
+  );
+});
