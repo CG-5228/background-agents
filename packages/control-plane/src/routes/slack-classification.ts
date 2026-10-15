@@ -69,10 +69,17 @@ async function classify(
     // Classification precedes target selection: never resolve repo, environment,
     // team, or user credentials here. Tokens stay inside the control plane.
     const deadlineAt = Date.now() + SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS;
-    const token = await withinProviderAccessDeadline(
-      globalOpenAIToken(env, ctx, deadlineAt),
-      deadlineAt
+    const credentialOperation = globalOpenAIToken(env, ctx, deadlineAt);
+    // Rotating grants must finish persistence or fencing after the caller stops waiting.
+    ctx.executionCtx.submit(
+      () =>
+        credentialOperation.then(
+          () => undefined,
+          () => undefined
+        ),
+      { name: "slack-classification-credential-settlement" }
     );
+    const token = await withinProviderAccessDeadline(credentialOperation, deadlineAt);
     const output = await requestOpenAICodexFunction(
       {
         accessToken: token.accessToken,

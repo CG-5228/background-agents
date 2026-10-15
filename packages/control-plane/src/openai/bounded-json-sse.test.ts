@@ -82,6 +82,32 @@ describe("bounded JSON SSE decoder", () => {
     ).resolves.toEqual([{ value: 1 }, { value: 2 }]);
   });
 
+  it.each([
+    ['{"value":1}', "\n"],
+    ['{"value":1}', "\r\n"],
+    ['{"value":"🌙"}', "\n"],
+    ['{"value":"🌙"}', "\r\n"],
+  ])("accepts exact payload limits under every chunk split: %s %j", async (payload, newline) => {
+    const bytes = new TextEncoder().encode(`data: ${payload}${newline}${newline}`);
+    const partitions = [
+      [bytes],
+      [...bytes].map((byte) => Uint8Array.of(byte)),
+      ...Array.from({ length: bytes.length - 1 }, (_, index) => [
+        bytes.slice(0, index + 1),
+        bytes.slice(index + 1),
+      ]),
+    ];
+    for (const chunks of partitions) {
+      await expect(
+        collectEvents(responseFromBytes(chunks), {
+          maxTotalBytes: bytes.byteLength,
+          maxEventBytes: new TextEncoder().encode(payload).byteLength,
+          maxEvents: 1,
+        })
+      ).resolves.toEqual([JSON.parse(payload)]);
+    }
+  });
+
   it("ignores an SSE event without data", async () => {
     await expect(collectEvents(responseFromText("event: ping\n\n"))).resolves.toEqual([]);
   });
@@ -108,11 +134,22 @@ describe("bounded JSON SSE decoder", () => {
 
   it("rejects event data over the per-event byte limit", async () => {
     await expect(
-      collectEvents(responseFromText('data: {"value":"too large"}\n\n'), {
+      collectEvents(responseFromText('data: {"v":\ndata: 123}\n\n'), {
         maxEventBytes: 8,
       })
     ).rejects.toEqual(new InvalidBoundedJsonSseError("SSE event exceeded the byte limit"));
   });
+
+  it.each([false, true])(
+    "bounds metadata wire lines independently of chunking (fragmented: %s)",
+    async (fragmented) => {
+      const bytes = new TextEncoder().encode(`event: ${"x".repeat(16)}\n\n`);
+      const chunks = fragmented ? [bytes.slice(0, -2), bytes.slice(-2)] : [bytes];
+      await expect(collectEvents(responseFromBytes(chunks), { maxEventBytes: 8 })).rejects.toEqual(
+        new InvalidBoundedJsonSseError("SSE line exceeded the byte limit")
+      );
+    }
+  );
 
   it("rejects an unterminated line over the per-event byte limit", async () => {
     await expect(

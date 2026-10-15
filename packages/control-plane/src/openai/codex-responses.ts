@@ -55,11 +55,13 @@ export async function requestOpenAICodexFunction(
   request: OpenAICodexFunctionRequest,
   egress: FetchClient
 ): Promise<unknown> {
+  const deadlineAt =
+    request.deadlineAt ?? Date.now() + SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS;
+  const headers = buildHeaders(request);
+  const body = buildBody(request);
+  const timeoutMs = deadlineAt - Date.now();
+  if (timeoutMs <= 0) throw new OpenAICodexUpstreamError("OpenAI Codex request deadline exceeded");
   const abortController = new AbortController();
-  const timeoutMs =
-    request.deadlineAt === undefined
-      ? SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS
-      : Math.max(0, request.deadlineAt - Date.now());
   const timeoutHandle = setTimeout(() => abortController.abort(), timeoutMs);
   try {
     let response: Response;
@@ -67,9 +69,9 @@ export async function requestOpenAICodexFunction(
       response = await waitForAbort(
         egress.fetch(CODEX_SUBSCRIPTION_RESPONSES_ENDPOINT, {
           method: "POST",
-          headers: buildHeaders(request),
+          headers,
           signal: abortController.signal,
-          body: buildBody(request),
+          body,
         }),
         abortController.signal
       );

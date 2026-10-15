@@ -147,7 +147,7 @@ describe("OpenAI Codex Responses client", () => {
     ]);
   });
 
-  it("uses output_item.done when response.completed has no output", async () => {
+  it("rejects missing terminal output even after a completed item", async () => {
     mockEgressFetch.mockResolvedValueOnce(
       fragmentedSseResponse(
         { type: "response.output_item.done", item: functionCall() },
@@ -155,7 +155,7 @@ describe("OpenAI Codex Responses client", () => {
       )
     );
 
-    await expect(request()).resolves.toEqual(output);
+    await expect(request()).rejects.toBeInstanceOf(InvalidOpenAICodexResponseError);
   });
 
   it("uses the remaining caller budget after credential resolution", async () => {
@@ -167,7 +167,41 @@ describe("OpenAI Codex Responses client", () => {
     await assertion;
   });
 
-  it("falls back to streamed function-call arguments", async () => {
+  it.each([-1_000, 0])("rejects an exhausted deadline (%s ms) before egress", async (offsetMs) => {
+    vi.useFakeTimers();
+    await expect(request({ deadlineAt: Date.now() + offsetMs })).rejects.toBeInstanceOf(
+      OpenAICodexUpstreamError
+    );
+    expect(mockEgressFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects incomplete terminal events on an open stream and cancels the body", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const response = openStreamResponse(
+      sseEvent({
+        type: "response.incomplete",
+        response: {
+          incomplete_details: {
+            reason: "max_output_tokens",
+            private: "sensitive upstream details",
+          },
+        },
+      }),
+      cancel
+    );
+    mockEgressFetch.mockResolvedValueOnce(response);
+    const operation = request().catch((error: unknown) => error);
+    // A terminal outcome must settle without waiting for the socket or deadline.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cancel).toHaveBeenCalledOnce();
+    const error = await operation;
+    expect(error).toBeInstanceOf(OpenAICodexUpstreamError);
+    expect((error as Error).message).not.toContain("sensitive");
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it("does not recover missing terminal output from streamed arguments", async () => {
     const argumentsValue = JSON.stringify(output);
     mockEgressFetch.mockResolvedValueOnce(
       fragmentedSseResponse(
@@ -189,10 +223,10 @@ describe("OpenAI Codex Responses client", () => {
       )
     );
 
-    await expect(request()).resolves.toEqual(output);
+    await expect(request()).rejects.toBeInstanceOf(InvalidOpenAICodexResponseError);
   });
 
-  it("rejects malformed authoritative output instead of a completed fallback", async () => {
+  it("ignores malformed intermediate arguments and uses terminal output", async () => {
     mockEgressFetch.mockResolvedValueOnce(
       fragmentedSseResponse(
         { type: "response.output_item.done", item: functionCall("not-json") },
@@ -203,7 +237,7 @@ describe("OpenAI Codex Responses client", () => {
       )
     );
 
-    await expect(request()).rejects.toBeInstanceOf(InvalidOpenAICodexResponseError);
+    await expect(request()).resolves.toEqual(output);
   });
 
   it.each([

@@ -7,6 +7,10 @@ type BoundedJsonSseLimits = {
 export class BoundedJsonSseAbortError extends Error {}
 export class InvalidBoundedJsonSseError extends Error {}
 
+// The event cap counts data bytes; a wire line also includes the optional
+// space after "data:" and a possible CR before LF.
+const SSE_DATA_LINE_OVERHEAD_BYTES = "data: \r".length;
+
 /** Races an operation against an abort signal, including operations that ignore the signal. */
 export function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(new BoundedJsonSseAbortError());
@@ -41,6 +45,12 @@ export async function* decodeBoundedJsonSse(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
+  const maxLineBytes = limits.maxEventBytes + SSE_DATA_LINE_OVERHEAD_BYTES;
+  const checkLineLimit = (line: string) => {
+    if (encoder.encode(line).byteLength > maxLineBytes) {
+      throw new InvalidBoundedJsonSseError("SSE line exceeded the byte limit");
+    }
+  };
   let lineBuffer = "";
   let eventData = "";
   let eventDataBytes = 0;
@@ -60,6 +70,7 @@ export async function* decodeBoundedJsonSse(
       let newlineIndex = lineBuffer.indexOf("\n");
       while (newlineIndex !== -1) {
         let line = lineBuffer.slice(0, newlineIndex);
+        checkLineLimit(line);
         lineBuffer = lineBuffer.slice(newlineIndex + 1);
         if (line.endsWith("\r")) line = line.slice(0, -1);
 
@@ -89,12 +100,7 @@ export async function* decodeBoundedJsonSse(
         }
         newlineIndex = lineBuffer.indexOf("\n");
       }
-      if (
-        lineBuffer.length > limits.maxEventBytes ||
-        encoder.encode(lineBuffer).byteLength > limits.maxEventBytes
-      ) {
-        throw new InvalidBoundedJsonSseError("SSE line exceeded the byte limit");
-      }
+      checkLineLimit(lineBuffer);
     }
   } catch (error) {
     if (error instanceof BoundedJsonSseAbortError || signal.aborted) throw error;

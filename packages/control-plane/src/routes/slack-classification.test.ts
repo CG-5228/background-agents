@@ -7,6 +7,7 @@ import { ScopedOAuthSecretsStore } from "../db/scoped-oauth-secrets";
 import { ProviderDefaultStore } from "../db/provider-account-defaults";
 import { ModelProviderAccountBroker } from "../auth/model-provider-account-broker";
 import { OpenAITokenBroker } from "../auth/openai-token-broker";
+import { createTestBackgroundTasks } from "../background-tasks.test-support";
 import {
   createTestEnv,
   createTestRequestHandler,
@@ -214,18 +215,69 @@ describe("Slack global OAuth classification route", () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 
-  it("bounds credential resolution before any upstream classification request", async () => {
-    const signed = await request();
-    vi.useFakeTimers();
-    const refresh = vi
-      .spyOn(OpenAITokenBroker.prototype, "refreshGlobal")
-      .mockReturnValue(new Promise(() => undefined));
-    const operation = handle(signed, env, TEST_BACKGROUND_TASK_CONTEXT);
-    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
-    await vi.advanceTimersByTimeAsync(SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS);
-    expect((await operation).status).toBe(502);
-    expect(upstream).not.toHaveBeenCalled();
-  });
+  it.each(["legacy", "managed"])(
+    "retains %s credential settlement after the HTTP deadline",
+    async (kind) => {
+      const signed = await request();
+      vi.useFakeTimers();
+      const background = createTestBackgroundTasks();
+      let release!: () => void;
+      const refreshResponse = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const persist = vi.fn().mockResolvedValue(undefined);
+      const acquire = vi.fn(async () => {
+        await refreshResponse;
+        await persist();
+        // Managed refresh can commit a rotation and then reject the expired caller.
+        if (kind === "managed") throw new Error("Caller deadline expired after settlement");
+        return {
+          accessToken: "rotated-token",
+          credentialVersion: 2,
+          expiresAt: Date.now() + 60_000,
+        };
+      });
+      if (kind === "legacy") {
+        vi.spyOn(OpenAITokenBroker.prototype, "refreshGlobal").mockImplementation(acquire);
+      } else {
+        vi.mocked(ProviderDefaultStore.prototype.get).mockResolvedValue({
+          provider: "openai",
+          providerAccountId: "mpa_default",
+          unattendedMode: "provider_account",
+          createdBy: null,
+          updatedBy: null,
+          createdAt: 1,
+          updatedAt: 1,
+        });
+        vi.spyOn(ModelProviderAccountBroker.prototype, "getAccess").mockImplementation(acquire);
+      }
+
+      try {
+        const operation = handle(signed, env, background);
+        await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+        await vi.advanceTimersByTimeAsync(SLACK_OAUTH_CLASSIFICATION_SERVER_TIMEOUT_MS);
+        expect((await operation).status).toBe(502);
+        expect(upstream).not.toHaveBeenCalled();
+        expect(persist).not.toHaveBeenCalled();
+        expect(background.submissions).toHaveLength(1);
+        let settled = false;
+        const settlement = background.settle().then(() => {
+          settled = true;
+        });
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        release();
+        await settlement;
+        expect(persist).toHaveBeenCalledOnce();
+        expect(settled).toBe(true);
+        expect(background.failures).toEqual([]);
+        expect(upstream).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await background.settle();
+      }
+    }
+  );
 
   it.each([
     () => new Response("<html>private-access-token</html>", { status: 403 }),
