@@ -276,6 +276,30 @@ the same revisions; it does not pick up newer edits. Start a new session to use 
 
 ---
 
+## Import a Repository Collection
+
+In **Settings > Skills**, choose **Import from repository**, then **Skill collection**. Select a
+connected repository, an optional branch, tag, or commit, and a directory prefix such as `skills`.
+Preview discovers independent directories containing `SKILL.md` at one resolved commit, ordered by
+source path. Nested skill roots are rejected because their supporting files would overlap.
+
+Review names, descriptions, source paths, warnings, conflicts, and file/byte totals. Expand a skill
+for its complete instructions and files. Existing names (including deleted skills), runtime-reserved
+names, and duplicate collection names cannot be selected. Choose skills individually or select all
+available skills, then apply shared global, repository, or environment assignments.
+
+Confirmation re-reads the collection and verifies the reviewed commit, paths, names, source digests,
+and generated revision digests. A changed source requires another preview. The selected skills,
+revisions, files, assignments, and individual commit-pinned provenance are saved atomically; any
+validation failure, name conflict, or failed write leaves the collection unimported.
+
+Each collection is limited to 100 skills, 500 source files, 8 MiB of source content, and 25 shared
+assignments. Per-skill limits below still apply. Collection preview and confirmation have a longer
+web proxy timeout to allow hundreds of source blob reads. Importing one skill and re-importing an
+existing skill continue to use their existing workflows.
+
+---
+
 ## Limits and File Rules
 
 | Constraint                         |                 Limit |
