@@ -129,8 +129,8 @@ instead of retyping it.
 | **Name**         | Optional canonical name. Defaults to the `name` in `SKILL.md`, then to the last segment of the source path.  |
 
 To import one skill from a repository that holds several, name its subdirectory. If the path you
-chose has no `SKILL.md`, the error lists the subdirectories that do. Importing several skills at
-once is not supported; repeat the import for each.
+chose has no `SKILL.md`, the error lists the subdirectories that do. To import several skills at
+once, see [Import a Repository Collection](#import-a-repository-collection).
 
 ### How `SKILL.md` maps onto a managed skill
 

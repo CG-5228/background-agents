@@ -56,6 +56,7 @@ export function SkillCollectionImport({
   const assignmentsUnavailable = Boolean(
     reposLoading || environmentsLoading || reposError || environmentsError
   );
+  const assignments = buildAssignments(assignmentKeys, repos, environments, INITIAL_ASSIGNMENTS);
 
   useEffect(() => {
     mounted.current = true;
@@ -123,7 +124,7 @@ export function SkillCollectionImport({
           expectedSourceSha256: skill.source.sourceSha256,
           expectedRevisionSha256: skill.revisionSha256,
         })),
-        assignments: buildAssignments(assignmentKeys, repos, environments, INITIAL_ASSIGNMENTS),
+        assignments,
       });
       if (!mounted.current) return;
       toast.success(`Imported ${skills.length} skill${skills.length === 1 ? "" : "s"}`);
@@ -144,7 +145,7 @@ export function SkillCollectionImport({
     preview?.skills.filter(
       (skill) => skill.nameAvailable && selectedRoots?.has(skill.source.subdirectory ?? "")
     ).length ?? 0;
-  const tooManyAssignments = assignmentKeys.size > MAX_BULK_SKILL_IMPORT_ASSIGNMENTS;
+  const tooManyAssignments = assignments.length > MAX_BULK_SKILL_IMPORT_ASSIGNMENTS;
 
   return (
     <div className="space-y-6">

@@ -5,16 +5,20 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_BULK_SKILL_IMPORT_ASSIGNMENTS } from "@open-inspect/shared/types/skills";
 import type { BulkSkillImportPreviewResponse } from "@open-inspect/shared/types/skills";
 import { BulkSkillImportReview } from "./bulk-skill-import-review";
 import { SkillImport } from "./skill-import";
 
 expect.extend(matchers);
 
-const { bulkImportSkillsMock, previewBulkSkillImportMock } = vi.hoisted(() => ({
-  bulkImportSkillsMock: vi.fn(),
-  previewBulkSkillImportMock: vi.fn(),
-}));
+const { bulkImportSkillsMock, previewBulkSkillImportMock, useEnvironmentsMock } = vi.hoisted(
+  () => ({
+    useEnvironmentsMock: vi.fn(),
+    bulkImportSkillsMock: vi.fn(),
+    previewBulkSkillImportMock: vi.fn(),
+  })
+);
 
 vi.mock("@/hooks/use-managed-skills", () => ({
   bulkImportSkills: bulkImportSkillsMock,
@@ -30,11 +34,7 @@ vi.mock("@/hooks/use-repos", () => ({
   }),
 }));
 vi.mock("@/hooks/use-environments", () => ({
-  useEnvironments: () => ({
-    environments: [{ id: "env-production", name: "Production" }],
-    loading: false,
-    error: undefined,
-  }),
+  useEnvironments: useEnvironmentsMock,
 }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() } }));
 
@@ -82,6 +82,11 @@ const preview: BulkSkillImportPreviewResponse = {
 };
 
 beforeEach(() => {
+  useEnvironmentsMock.mockReset().mockReturnValue({
+    environments: [{ id: "env-production", name: "Production" }],
+    loading: false,
+    error: undefined,
+  });
   previewBulkSkillImportMock.mockReset();
   bulkImportSkillsMock.mockReset();
   previewBulkSkillImportMock.mockResolvedValue(preview);
@@ -169,6 +174,41 @@ describe("SkillImport collection mode", () => {
       assignments: [{ type: "global" }],
     });
     expect(onImported).toHaveBeenCalledWith(null);
+  });
+
+  it("counts submitted assignments when a selected target disappears", async () => {
+    const environments = Array.from({ length: MAX_BULK_SKILL_IMPORT_ASSIGNMENTS }, (_, index) => ({
+      id: `env-${index}`,
+      name: `Environment ${index}`,
+    }));
+    useEnvironmentsMock.mockReturnValue({ environments, loading: false, error: undefined });
+    const user = userEvent.setup();
+    const onImported = vi.fn();
+    const onCancel = vi.fn();
+    const view = render(<SkillImport onImported={onImported} onCancel={onCancel} />);
+    await user.click(screen.getByRole("button", { name: "Skill collection" }));
+    await user.click(screen.getByLabelText("Repository"));
+    await user.click(await screen.findByRole("option", { name: "acme/skills" }));
+    await user.click(screen.getByRole("button", { name: "Preview collection" }));
+    for (const environment of environments) {
+      await user.click(screen.getByRole("checkbox", { name: environment.name }));
+    }
+    expect(screen.getByRole("button", { name: "Import 1 skills" })).toBeDisabled();
+
+    useEnvironmentsMock.mockReturnValue({
+      environments: environments.slice(1),
+      loading: false,
+      error: undefined,
+    });
+    view.rerender(<SkillImport onImported={onImported} onCancel={onCancel} />);
+    expect(screen.getByRole("button", { name: "Import 1 skills" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Import 1 skills" }));
+    expect(bulkImportSkillsMock.mock.calls[0][0].assignments).toEqual([
+      { type: "global" },
+      ...environments
+        .slice(1)
+        .map((environment) => ({ type: "environment", environmentId: environment.id })),
+    ]);
   });
 
   it.each([false, true])("preserves exclusions on refresh (new member: %s)", async (addMember) => {
