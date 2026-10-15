@@ -1,5 +1,5 @@
 import { beforeEach, expect, it } from "vitest";
-import { EventRepository } from "../../src/session/event-repository";
+import { EventRepository, MAX_RECOVERY_CONTEXT_CHARS } from "../../src/session/event-repository";
 import { cleanD1Tables } from "./cleanup";
 import { initSession, seedEvents } from "./helpers";
 import { runInSessionDO } from "./session-do-access";
@@ -46,4 +46,25 @@ it("reads the previous conversation from real DO storage independently of sandbo
     ],
     truncated: false,
   });
+});
+
+it("retains the decision at the end of a cutoff event in real DO SQLite", async () => {
+  const { stub } = await initSession();
+  await seedEvents(stub, [
+    {
+      id: "large-answer",
+      type: "token",
+      messageId: "previous",
+      createdAt: 1000,
+      data: JSON.stringify({ content: "x".repeat(MAX_RECOVERY_CONTEXT_CHARS) + "Use X" }),
+    },
+  ]);
+  const context = await runInSessionDO(stub, (_instance, state) =>
+    new EventRepository(state.storage.sql, (callback) =>
+      state.storage.transactionSync(callback)
+    ).getRecoveryContext("current")
+  );
+  expect(context.messages[0].content.endsWith("Use X")).toBe(true);
+  expect(context.messages[0].content).toHaveLength(MAX_RECOVERY_CONTEXT_CHARS);
+  expect(context.truncated).toBe(true);
 });

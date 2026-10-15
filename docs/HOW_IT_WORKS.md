@@ -359,13 +359,15 @@ follow-up prompts in an existing session are much faster than the first prompt.
 
 If the runtime cannot resume the agent's native conversation (for example, after a fresh sandbox
 replaces a lost one), the control plane supplies stored user and assistant text with the next
-prompt. The bridge includes that text in the first turn of the new agent conversation. An existing
-native conversation continues with its own history. Recovery keeps the most recent text within the
-bounds defined by `MAX_RECOVERY_CONTEXT_MESSAGES` and `MAX_RECOVERY_CONTEXT_CHARS` in the event
-repository. The timeline warns when this fallback is used and when text was truncated. Tool results,
-earlier attachments, and uncommitted files are not reconstructed by transcript recovery; the agent
-is told to verify the workspace before continuing. This fallback requires an updated sandbox
-runtime; snapshots retaining an older runtime continue to use that runtime's recovery behavior.
+prompt. The bridge includes that text until assistant activity or a successful turn confirms
+submission. Pending recovery survives bridge restarts and snapshots alongside the native session
+pointer. An existing native conversation continues with its own history. Recovery keeps the most
+recent text within the bounds defined by `MAX_RECOVERY_CONTEXT_MESSAGES` and
+`MAX_RECOVERY_CONTEXT_CHARS` in the event repository. The timeline warns when this fallback is used
+and when text was truncated. Tool results, earlier attachments, and uncommitted files are not
+reconstructed by transcript recovery; the agent is told to verify the workspace before continuing.
+This fallback requires an updated sandbox runtime; snapshots retaining an older runtime continue to
+use that runtime's recovery behavior.
 
 ### Prebuilt Image Start
 

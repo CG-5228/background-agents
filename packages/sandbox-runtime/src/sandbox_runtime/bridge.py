@@ -181,6 +181,7 @@ class AgentBridge:
         temp_dir = Path(tempfile.gettempdir())
         self.session_id_file = temp_dir / "agent-session-id"
         self.legacy_session_id_file = temp_dir / "opencode-session-id"
+        self._conversation_recovery_pending = False
         self.repo_path = Path("/workspace")
         # Supervisor-written canonical repo manifest; push targeting resolves
         # member checkout paths through it rather than joining spec-supplied
@@ -265,6 +266,10 @@ class AgentBridge:
     @property
     def harness(self) -> AgentHarness | None:
         return self.boot_attach.harness
+
+    @property
+    def _recovery_pending_file(self) -> Path:
+        return self.session_id_file.with_suffix(".recovery-pending")
 
     @property
     def agent_session_id(self) -> str | None:
@@ -760,12 +765,12 @@ class AgentBridge:
         )
 
         try:
-            harness, attachments, session_created = await self._prepare_turn(
+            harness, attachments = await self._prepare_turn(
                 message_id, author_data, raw_attachments, turn_deadline
             )
 
             recovery_context = cmd.get("recoveryContext") or {}
-            if session_created and recovery_context.get("messages"):
+            if self._conversation_recovery_pending and recovery_context.get("messages"):
                 truncation = (
                     " The recovered transcript was truncated to the most recent text."
                     if recovery_context.get("truncated")
@@ -801,6 +806,16 @@ class AgentBridge:
                     tool_call_event_count += 1
                 if event.get("type") in ("token", "tool_call", "step_finish"):
                     emitted_output = True
+                if self._conversation_recovery_pending and event.get("type") in (
+                    "token",
+                    "tool_call",
+                    "step_start",
+                    "step_finish",
+                ):
+                    # Assistant activity proves the input reached the conversation,
+                    # even when a later model/transport error fails the turn.
+                    self._conversation_recovery_pending = False
+                    await self._persist_rotated_session_id(harness)
                 # A cancelled turn never returns an outcome, so the last cost
                 # report is the only figure execution_complete can carry then.
                 # When an outcome does arrive it is authoritative (below).
@@ -837,6 +852,8 @@ class AgentBridge:
                 "cancelled" if turn.cancelled else "success" if turn.success else "error"
             )
             phase = "session_persistence"
+            if turn.success:
+                self._conversation_recovery_pending = False
             await self._persist_rotated_session_id(harness)
             phase = "output_checks"
             # The outcome is authoritative for cost and success once it
@@ -919,7 +936,7 @@ class AgentBridge:
         author_data: Any,
         raw_attachments: Any,
         deadline: float,
-    ) -> tuple[AgentHarness, list[HydratedSessionAttachment] | None, bool]:
+    ) -> tuple[AgentHarness, list[HydratedSessionAttachment] | None]:
         """The harness and hydrated attachments a turn needs, within the prompt's deadline.
 
         Everything before the turn spends the prompt's own budget: the wait
@@ -950,7 +967,7 @@ class AgentBridge:
                         f"{rejected_attachments} invalid attachment(s) were skipped."
                     )
                 attachments = await self.attachment_processor.process(session_attachments)
-                session_created = await self._ensure_agent_session(harness)
+                await self._ensure_agent_session(harness)
         except TimeoutError:
             budget = int(self.prompt_limits.prompt_max_duration_seconds)
             if self.boot_attach.booting:
@@ -959,20 +976,23 @@ class AgentBridge:
         if self.shutdown_preparation.fenced:
             raise RuntimeError("sandbox_lifetime_expiring")
         self._assert_authenticated_generation()
-        return harness, attachments, session_created
+        return harness, attachments
 
     def _assert_authenticated_generation(self) -> None:
         if self._reauthenticating_generation:
             raise RuntimeError("harness_reauthenticating")
 
-    async def _ensure_agent_session(self, harness: AgentHarness | None = None) -> bool:
-        """Create the vendor session on first use and persist its id."""
+    async def _ensure_agent_session(self, harness: AgentHarness | None = None) -> None:
+        """Create the vendor session; keep recovery pending until input is accepted."""
         harness = harness if harness is not None else self._require_harness()
         if harness.session_id:
-            return False
+            return
+        # Persist intent before creation: some harnesses also save their own
+        # native pointer and can restore an empty conversation independently.
+        self._conversation_recovery_pending = True
+        self._recovery_pending_file.touch()
         await harness.create_session()
         await self._save_session_id(harness)
-        return True
 
     async def _handle_stop(self) -> None:
         """Handle stop command - cancel prompt task and ask the harness to abort."""
@@ -1148,6 +1168,7 @@ class AgentBridge:
         """
         harness = harness if harness is not None else self._require_harness()
         try:
+            self._conversation_recovery_pending = self._recovery_pending_file.exists()
             persisted = self._read_persisted_session_id()
         except Exception as e:
             self.log.error("agent.session.load_error", exc=e)
@@ -1173,7 +1194,9 @@ class AgentBridge:
             if strict:
                 raise
             return
-        if harness.session_id and harness.session_id != persisted:
+        if harness.session_id and (
+            harness.session_id != persisted or self._recovery_pending_file.exists()
+        ):
             await self._save_session_id(harness, strict=strict)
 
     async def _save_session_id(
@@ -1185,6 +1208,8 @@ class AgentBridge:
         if session_id:
             try:
                 self.session_id_file.write_text(session_id)
+                if not self._conversation_recovery_pending:
+                    self._recovery_pending_file.unlink(missing_ok=True)
             except Exception as e:
                 self.log.error("agent.session.save_error", exc=e)
                 if strict:

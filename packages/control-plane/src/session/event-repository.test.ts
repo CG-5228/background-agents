@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createNodeSqlStorage } from "../node/sqlite-storage";
 import {
   EventRepository,
@@ -7,14 +7,17 @@ import {
   MAX_RECOVERY_CONTEXT_MESSAGES,
 } from "./event-repository";
 import { initSchema } from "./schema";
+import type { SqlStorage } from "./sql-storage";
 
 describe("conversation recovery from durable events", () => {
   let db: DatabaseSync;
   let events: EventRepository;
+  let sql: SqlStorage;
 
   beforeEach(() => {
     db = new DatabaseSync(":memory:");
     const storage = createNodeSqlStorage(db);
+    sql = storage.sql;
     initSchema(storage.sql);
     events = new EventRepository(storage.sql, storage.transactionSync);
   });
@@ -99,9 +102,43 @@ describe("conversation recovery from durable events", () => {
   });
 
   it("does not split a Unicode surrogate pair at the text budget", () => {
-    user("unicode", "x".repeat(MAX_RECOVERY_CONTEXT_CHARS - 1) + "😀tail");
+    user("unicode", "😀" + "x".repeat(MAX_RECOVERY_CONTEXT_CHARS - 1));
     const context = events.getRecoveryContext("current");
-    expect(context.messages[0].content).toBe("x".repeat(MAX_RECOVERY_CONTEXT_CHARS - 1));
+    expect(context.messages[0].content).toHaveLength(MAX_RECOVERY_CONTEXT_CHARS - 1);
+    expect(context.messages[0].content[0]).toBe("x");
     expect(context.truncated).toBe(true);
+  });
+
+  it("retains a decision at the end of an oversized assistant event", () => {
+    token("latest", "x".repeat(MAX_RECOVERY_CONTEXT_CHARS) + "Use X");
+    const context = events.getRecoveryContext("current");
+    expect(context.messages).toHaveLength(1);
+    expect(context.messages[0].role).toBe("assistant");
+    expect(context.messages[0].content).toHaveLength(MAX_RECOVERY_CONTEXT_CHARS);
+    expect(context.messages[0].content.endsWith("Use X")).toBe(true);
+    expect(context.truncated).toBe(true);
+  });
+
+  it("keeps the suffix when newer text has already spent part of the budget", () => {
+    user("older", "x".repeat(MAX_RECOVERY_CONTEXT_CHARS) + "Use X", 1);
+    user("newer", "Continue.", 2);
+    const context = events.getRecoveryContext("current");
+    expect(context.messages[0].content.endsWith("Use X")).toBe(true);
+    expect(context.messages.map(({ content }) => content).join("")).toHaveLength(
+      MAX_RECOVERY_CONTEXT_CHARS
+    );
+    expect(context.truncated).toBe(true);
+  });
+
+  it("bounds extracted text by the total budget even with many large events", () => {
+    for (let i = 0; i < MAX_RECOVERY_CONTEXT_MESSAGES; i++) {
+      user(`large-${i}`, "x".repeat(MAX_RECOVERY_CONTEXT_CHARS + 10));
+    }
+    const read = vi.spyOn(sql, "exec");
+    events.getRecoveryContext("current");
+    const rows = read.mock.results[0].value.toArray() as Array<{ content: string | null }>;
+    expect(rows.reduce((total, row) => total + (row.content?.length ?? 0), 0)).toBeLessThanOrEqual(
+      MAX_RECOVERY_CONTEXT_CHARS + 1
+    );
   });
 });

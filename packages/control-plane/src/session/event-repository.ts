@@ -67,17 +67,34 @@ export class EventRepository {
 
   /** Text fallback for a runtime that could not resume its native conversation. */
   getRecoveryContext(currentMessageId: string): ConversationRecoveryContext {
-    // Extract and bound text in SQLite so large cumulative token events cannot
-    // exhaust the DO heap. Queued prompts have no user_message event yet.
+    // Budget in SQLite before extracting text: only the newest text plus one
+    // truncation sentinel crosses into the DO heap. SQLite counts code points;
+    // the loop below also enforces the UTF-16 budget used by TypeScript.
+    // Queued prompts have no user_message event yet.
     const rows = this.sql
       .exec(
-        `SELECT type, substr(json_extract(data, '$.content'), 1, ?) AS content
-         FROM events
-         WHERE type IN ('user_message', 'token') AND message_id != ?
-         ORDER BY created_at DESC, timeline_sequence DESC LIMIT ?`,
-        MAX_RECOVERY_CONTEXT_CHARS + 1,
+        `WITH recent AS (
+           SELECT id, type, created_at, timeline_sequence,
+                  length(json_extract(data, '$.content')) AS chars
+           FROM events
+           WHERE type IN ('user_message', 'token') AND message_id != ?
+           ORDER BY created_at DESC, timeline_sequence DESC LIMIT ?
+         ), budgeted AS (
+           SELECT *, COALESCE(SUM(chars) OVER (
+             ORDER BY created_at DESC, timeline_sequence DESC
+             ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+           ), 0) AS newer_chars
+           FROM recent
+         )
+         SELECT budgeted.type,
+                substr(json_extract(events.data, '$.content'), -(? - newer_chars)) AS content
+         FROM budgeted JOIN events ON events.id = budgeted.id
+         WHERE newer_chars <= ?
+         ORDER BY budgeted.created_at DESC, budgeted.timeline_sequence DESC`,
         currentMessageId,
-        MAX_RECOVERY_CONTEXT_MESSAGES + 1
+        MAX_RECOVERY_CONTEXT_MESSAGES + 1,
+        MAX_RECOVERY_CONTEXT_CHARS + 1,
+        MAX_RECOVERY_CONTEXT_CHARS
       )
       .toArray() as Array<{ type: string; content: string | null }>;
     const messages: ConversationRecoveryContext["messages"] = [];
@@ -89,9 +106,9 @@ export class EventRepository {
         truncated = true;
         break;
       }
-      let content = row.content.slice(0, remaining);
+      let content = row.content.slice(-remaining);
       // Do not split a UTF-16 surrogate pair at the text budget boundary.
-      if (/[\uD800-\uDBFF]$/.test(content)) content = content.slice(0, -1);
+      if (/^[\uDC00-\uDFFF]/.test(content)) content = content.slice(1);
       truncated ||= content.length < row.content.length;
       remaining -= content.length;
       messages.push({ role: row.type === "user_message" ? "user" : "assistant", content });

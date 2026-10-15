@@ -121,16 +121,31 @@ class TestSessionIdentity:
         assert bridge.session_id_file.read_text() == "oc-live"
 
     @pytest.mark.asyncio
-    async def test_first_prompt_creates_the_session_the_harness_owns(self, tmp_path: Path) -> None:
+    async def test_pending_recovery_survives_session_id_persistence(self, tmp_path: Path) -> None:
         harness = ScriptedHarness(session_id=None)
         bridge = _bridge(harness)
         bridge.session_id_file = tmp_path / "agent-session-id"
+        bridge.legacy_session_id_file = tmp_path / "opencode-session-id"
 
         await bridge._ensure_agent_session()
         await bridge._ensure_agent_session()
 
         assert bridge.agent_session_id == harness.session_id == "oc-session-new"
+        await bridge._persist_rotated_session_id(harness, strict=True)
         assert bridge.session_id_file.read_text() == "oc-session-new"
+        assert bridge._recovery_pending_file.exists()
+
+        bridge._configure_git_identity = AsyncMock()
+        bridge._send_event = AsyncMock()
+        await bridge._handle_prompt(
+            {
+                "messageId": "first",
+                "content": "hi",
+                "author": {"gitIdentity": {"mode": "agent-only"}},
+            }
+        )
+        assert bridge.session_id_file.read_text() == "oc-session-new"
+        assert not bridge._recovery_pending_file.exists()
 
     @pytest.mark.asyncio
     async def test_an_id_rotated_during_a_turn_is_persisted(self, tmp_path: Path) -> None:

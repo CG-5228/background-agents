@@ -77,7 +77,7 @@ def bridge():
     bridge.diff_refresh = MagicMock()
     bridge._send_event = AsyncMock(return_value=True)
     bridge._persist_rotated_session_id = AsyncMock()
-    bridge._prepare_turn = AsyncMock(return_value=(bridge.harness, None, False))
+    bridge._prepare_turn = AsyncMock(return_value=(bridge.harness, None))
     return bridge
 
 

@@ -159,7 +159,7 @@ async def test_shutdown_override_wins_when_prompt_returns_success_during_cancell
 
     harness = RacingHarness()
     bridge = make_bridge(harness)
-    bridge._prepare_turn = AsyncMock(return_value=(harness, None, False))
+    bridge._prepare_turn = AsyncMock(return_value=(harness, None))
     bridge._persist_rotated_session_id = AsyncMock()
     await establish_generation(bridge)
 

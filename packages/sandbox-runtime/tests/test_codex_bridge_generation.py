@@ -66,7 +66,7 @@ async def test_terminal_carries_zero_cost_even_when_step_delivery_is_lost():
         return_value=TurnOutcome.failed("native disconnected", message_cost_usd=0)
     )
     bridge = _bridge(harness)
-    bridge._prepare_turn = AsyncMock(return_value=(harness, [], False))
+    bridge._prepare_turn = AsyncMock(return_value=(harness, []))
     bridge._persist_rotated_session_id = AsyncMock()
     terminal = await bridge._handle_prompt({"messageId": "msg", "content": "work"})
     assert "costAvailability" not in terminal

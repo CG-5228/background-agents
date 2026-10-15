@@ -1,10 +1,12 @@
 """A replacement runtime must put durable conversation text into its first turn."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from sandbox_runtime.bridge import AgentBridge
+from sandbox_runtime.harness import TurnOutcome
 from tests.conftest import ScriptedHarness
 
 
@@ -70,6 +72,77 @@ async def test_truncated_recovery_is_visible_to_model_and_user(tmp_path):
         call.args[0]["type"] == "warning" and "truncated" in call.args[0]["message"].lower()
         for call in bridge._send_event.call_args_list
     )
+
+
+@pytest.mark.parametrize("failure", ["rejected", "exception", "cancelled"])
+@pytest.mark.parametrize("restart_bridge", [False, True])
+async def test_failed_first_submission_keeps_recovery_pending(tmp_path, failure, restart_bridge):
+    class FailingSubmission(ScriptedHarness):
+        async def run_prompt(self, prompt, emit):
+            if not self.prompts:
+                self.prompts.append(prompt)
+                if failure == "exception":
+                    raise RuntimeError("submission failed")
+                if failure == "cancelled":
+                    raise asyncio.CancelledError
+                return TurnOutcome.failed("submission rejected")
+            return await super().run_prompt(prompt, emit)
+
+    harness = FailingSubmission(session_id=None)
+    bridge = make_bridge(tmp_path, harness)
+    result = await bridge._handle_prompt(command())
+    assert result["success"] is False
+    assert bridge._recovery_pending_file.exists()
+
+    if restart_bridge:
+        harness = ScriptedHarness(session_id=None)
+        bridge = make_bridge(tmp_path, harness)
+        await bridge._load_session_id()
+    retry = await bridge._handle_prompt({**command(), "messageId": "retry"})
+
+    assert retry["success"] is True
+    assert "Use approach X; do not use Y." in harness.prompts[-1].text
+    assert bridge.session_id_file.read_text() == harness.session_id
+    assert not bridge._recovery_pending_file.exists()
+
+
+async def test_harness_restoring_its_own_empty_session_still_recovers(tmp_path):
+    # Codex can resume its manifest before the bridge loads a pointer file.
+    harness = ScriptedHarness(session_id="native-restored-empty-session")
+    bridge = make_bridge(tmp_path, harness)
+    bridge._recovery_pending_file.touch()
+    await bridge._load_session_id()
+
+    result = await bridge._handle_prompt(command())
+
+    assert result["success"] is True
+    assert "Use approach X; do not use Y." in harness.prompts[0].text
+    assert not bridge._recovery_pending_file.exists()
+
+
+@pytest.mark.parametrize("activity", ["token", "step_start"])
+@pytest.mark.parametrize("restart_bridge", [False, True])
+async def test_failure_after_assistant_activity_does_not_repeat_recovery(
+    tmp_path, activity, restart_bridge
+):
+    class FailureAfterAcceptance(ScriptedHarness):
+        async def run_prompt(self, prompt, emit):
+            self.prompts.append(prompt)
+            await emit({"type": activity, "content": "Starting.", "messageId": prompt.message_id})
+            return TurnOutcome.failed("provider failed after producing output")
+
+    harness = FailureAfterAcceptance(session_id=None)
+    bridge = make_bridge(tmp_path, harness)
+    await bridge._handle_prompt(command())
+    assert "Use approach X; do not use Y." in harness.prompts[0].text
+    if restart_bridge:
+        harness = ScriptedHarness(session_id=None)
+        bridge = make_bridge(tmp_path, harness)
+        await bridge._load_session_id()
+    await bridge._handle_prompt({**command(), "messageId": "retry"})
+
+    assert harness.prompts[-1].text == command()["content"]
+    assert bridge.session_id_file.read_text() == harness.session_id
 
 
 def make_bridge(tmp_path, harness):
