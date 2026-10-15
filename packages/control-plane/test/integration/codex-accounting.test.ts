@@ -31,6 +31,48 @@ async function initCodexAccountingSession() {
   return { stub, submit };
 }
 
+it("accepts message-less boot warnings and attributes delayed warnings to the original message", async () => {
+  const { stub, submit } = await initCodexAccountingSession();
+  await queryDO(stub, "UPDATE messages SET status = 'completed', completed_at = 4 WHERE id = 'm'");
+  const bootResponse = await submit({
+    type: "warning",
+    scope: "setup",
+    message: "Optional setup hook failed",
+    messageId: undefined,
+  });
+  expect(bootResponse.status).toBe(200);
+
+  const [participant] = await queryDO<{ id: string }>(stub, "SELECT id FROM participants LIMIT 1");
+  await seedMessage(stub, {
+    id: "m-next",
+    authorId: participant.id,
+    content: "next task",
+    source: "web",
+    status: "processing",
+    createdAt: 5,
+    startedAt: 6,
+  });
+  const warning = {
+    type: "warning",
+    scope: "budget",
+    message: "Codex API-equivalent cost is incomplete",
+    messageId: "m",
+    timestamp: 7,
+  };
+  expect((await submit(warning)).status).toBe(200);
+
+  const warnings = await queryDO<{ message_id: string | null; data: string }>(
+    stub,
+    "SELECT message_id, data FROM events WHERE type = 'warning' ORDER BY timeline_sequence"
+  );
+  expect(warnings).toHaveLength(2);
+  expect(warnings[0].message_id).toBeNull();
+  expect(JSON.parse(warnings[0].data)).toMatchObject({ scope: "setup" });
+  expect(JSON.parse(warnings[0].data)).not.toHaveProperty("messageId");
+  expect(warnings[1].message_id).toBe("m");
+  expect(JSON.parse(warnings[1].data)).toEqual({ sandboxId: "sb", ...warning });
+});
+
 it.each([
   { cost: 0, expectedCost: 0 },
   { cost: null, expectedCost: null },
@@ -77,7 +119,7 @@ it.each([
 it("persists native pricing corrections and accounts cumulative costs once through final budget repair", async () => {
   const { stub, submit } = await initCodexAccountingSession();
   const pricing = {
-    source: "models.dev",
+    source: "custom",
     model: "gpt-6.1-sol",
     rates: { input: 2, output: 10, cache_read: 0.2, tiers: [{ context: 200000, input: 4 }] },
   };

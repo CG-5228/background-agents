@@ -41,16 +41,23 @@ describe("stepUsageSchema", () => {
     expect(stepUsageSchema.parse(stepUsage)).not.toHaveProperty("pricing");
   });
 
-  it("preserves the applied pricing snapshot on usage and step_finish events", () => {
-    expect(stepUsageSchema.parse({ ...stepUsage, pricing })).toEqual({ ...stepUsage, pricing });
-    const event = { type: "step_finish", sandboxId: "s", messageId: "m", timestamp: 1 };
-    expect(sandboxEventSchema.parse({ ...event, cost: 0.01, pricing })).toEqual({
-      ...event,
-      cost: 0.01,
-      pricing,
-    });
-    expect(sandboxEventSchema.parse(event)).not.toHaveProperty("pricing");
-  });
+  it.each(["models.dev", "custom"] as const)(
+    "preserves %s pricing on usage and step_finish events",
+    (source) => {
+      const snapshot = { ...pricing, source };
+      expect(stepUsageSchema.parse({ ...stepUsage, pricing: snapshot })).toEqual({
+        ...stepUsage,
+        pricing: snapshot,
+      });
+      const event = { type: "step_finish", sandboxId: "s", messageId: "m", timestamp: 1 };
+      expect(sandboxEventSchema.parse({ ...event, cost: 0.01, pricing: snapshot })).toEqual({
+        ...event,
+        cost: 0.01,
+        pricing: snapshot,
+      });
+      expect(sandboxEventSchema.parse(event)).not.toHaveProperty("pricing");
+    }
+  );
 
   it.each([
     null,

@@ -6,8 +6,9 @@ import json
 import math
 import time
 from copy import deepcopy
-from typing import Any
+from typing import Any, Literal
 
+from ...event_size import event_size_bytes
 from ..tool_results import content_text
 from .pricing import price_codex_usage
 
@@ -25,6 +26,7 @@ TOKEN_FIELDS = (
     "totalTokens",
 )
 MAX_SAFE_TOKEN_COUNT = 2**53 - 1
+MAX_PRICING_SNAPSHOT_BYTES = 16 * 1024
 
 
 def _token_counts(value: Any) -> dict[str, int] | None:
@@ -74,6 +76,7 @@ class CodexTurnEvents:
         *,
         baseline_known: bool = True,
         pricing_model: dict[str, Any] | None = None,
+        pricing_source: Literal["models.dev", "custom"] = "models.dev",
     ) -> None:
         self.message_id, self.thread_id, self.turn_id = message_id, thread_id, turn_id
         self.model = model
@@ -95,6 +98,16 @@ class CodexTurnEvents:
         self.usage_valid = True
         self.has_usage = False
         self.pricing_model = deepcopy(pricing_model)
+        self._pricing_snapshot: dict[str, Any] | None = None
+        if self.pricing_model is not None and isinstance(self.pricing_model.get("cost"), dict):
+            snapshot = {
+                "source": pricing_source,
+                "model": f"openai/{self.model}",
+                "rates": self.pricing_model["cost"],
+            }
+            # Optional catalog metadata must never crowd out live budget reports.
+            if event_size_bytes(snapshot) <= MAX_PRICING_SNAPSHOT_BYTES:
+                self._pricing_snapshot = snapshot
         self.message_cost_usd: float | None = None
         self.cost_complete = self.baseline_known
         self._pricing_allowed = self.baseline_known
@@ -121,16 +134,8 @@ class CodexTurnEvents:
                 else {}
             ),
             **(
-                {
-                    "pricing": {
-                        "source": "models.dev",
-                        "model": f"openai/{self.model}",
-                        "rates": deepcopy(self.pricing_model["cost"]),
-                    }
-                }
-                if self.message_cost_usd is not None
-                and self.pricing_model is not None
-                and isinstance(self.pricing_model.get("cost"), dict)
+                {"pricing": deepcopy(self._pricing_snapshot)}
+                if self.message_cost_usd is not None and self._pricing_snapshot is not None
                 else {}
             ),
             "reason": self.status or "unknown",

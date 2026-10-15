@@ -166,6 +166,38 @@ async def test_unknown_cost_warns_once_without_inventing_zero(tmp_path, pricing)
         await harness.close()
 
 
+@pytest.mark.parametrize("custom_url", [None, "https://catalog.example.invalid"])
+async def test_explicit_catalog_prices_are_labeled_custom_without_exporting_location(
+    tmp_path, custom_url
+):
+    rates = {"input": 2, "output": 10}
+    loader = AsyncMock(return_value={"gpt-6.1-sol": {"cost": rates}})
+    harness, client = build(tmp_path, pricing_loader=loader)
+    harness._environ["OPENCODE_MODELS_PATH"] = str(tmp_path / "private-catalog.json")
+    if custom_url is not None:
+        harness._environ["OPENCODE_MODELS_URL"] = custom_url
+    await harness.open()
+    harness.session_id = "thread"
+    client.request.return_value = {"turn": {"id": "turn"}}
+    client.next_notification = AsyncMock(
+        side_effect=[usage_notification(), completed_notification()]
+    )
+    emit = AsyncMock()
+    try:
+        outcome = await harness.run_prompt(HarnessPrompt("message", "work"), emit)
+        assert outcome.success
+        assert outcome.message_cost_usd == pytest.approx(0.0004)
+        for call in emit.await_args_list:
+            if call.args[0]["type"] == "step_finish":
+                assert call.args[0]["pricing"] == {
+                    "source": "custom",
+                    "model": "openai/gpt-6.1-sol",
+                    "rates": rates,
+                }
+    finally:
+        await harness.close()
+
+
 async def test_pricing_loader_refreshes_each_turn_without_repricing_previous_usage(tmp_path):
     rates = [{"input": 2, "output": 10}, {"input": 4, "output": 20}]
     loader = AsyncMock(side_effect=[{"gpt-6.1-sol": {"cost": rate}} for rate in rates])

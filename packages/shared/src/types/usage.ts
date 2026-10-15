@@ -12,7 +12,7 @@ export interface NormalizedTokenUsage {
 }
 
 export const stepPricingSchema = z.object({
-  source: z.literal("models.dev"),
+  source: z.enum(["models.dev", "custom"]),
   model: z.string(),
   rates: z.record(z.string(), z.unknown()),
 });

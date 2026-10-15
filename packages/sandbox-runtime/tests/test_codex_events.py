@@ -3,7 +3,9 @@ from copy import deepcopy
 
 import pytest
 
-from sandbox_runtime.harness.codex.events import CodexTurnEvents
+from sandbox_runtime.event_size import MAX_EVENT_BYTES, event_size_bytes
+from sandbox_runtime.harness.codex.events import MAX_PRICING_SNAPSHOT_BYTES, CodexTurnEvents
+from tests.event_forwarder_fakes import make_forwarder, open_ws, sent_events
 
 
 @pytest.fixture
@@ -65,8 +67,6 @@ def test_web_actions_use_display_tool_and_arguments(method, action, summary, too
 
 
 def test_long_text_is_coalesced_and_final_projection_fits_transport(monkeypatch):
-    from sandbox_runtime.event_size import MAX_EVENT_BYTES, event_size_bytes
-
     now = 0.0
     monkeypatch.setattr("sandbox_runtime.harness.codex.events.time.monotonic", lambda: now)
     state = CodexTurnEvents("m", "thread", "turn", "gpt-6.1-sol", {})
@@ -241,6 +241,61 @@ def test_pricing_snapshot_is_immutable(pricing_model, mutated_snapshot):
     assert state.finish()["pricing"] == expected_pricing
     if mutated_snapshot == "catalog":
         assert first["pricing"] == expected_pricing
+
+
+@pytest.mark.parametrize("oversized_field", ["extra", "tier", "tiers"])
+async def test_oversized_pricing_metadata_does_not_drop_live_cost_updates(
+    pricing_model, oversized_field
+):
+    if oversized_field == "extra":
+        pricing_model["cost"]["extra"] = "x" * (MAX_EVENT_BYTES + 100_000)
+    elif oversized_field == "tier":
+        pricing_model["cost"]["tiers"] = [
+            {
+                "input": 4,
+                "output": 16,
+                "tier": {"type": "context", "size": 1000},
+                "extra": "x" * (MAX_EVENT_BYTES + 100_000),
+            }
+        ]
+    else:
+        pricing_model["cost"]["tiers"] = [
+            {"input": 4, "output": 16, "tier": {"type": "context", "size": size}}
+            for size in range(1000, 17000)
+        ]
+    assert event_size_bytes(pricing_model) > MAX_EVENT_BYTES
+    state = CodexTurnEvents("m", "thread", "turn", "gpt-6.1-sol", {}, pricing_model=pricing_model)
+    forwarder = make_forwarder()
+    ws = open_ws()
+    await forwarder.bind(ws)
+
+    for total, expected_cost in [(100, 0.0002), (200, 0.0004)]:
+        event = usage(state, counts(total), counts(100))
+        assert event["cost"] == pytest.approx(expected_cost)
+        assert event["messageCostUsd"] == pytest.approx(expected_cost)
+        assert "pricing" not in event
+        assert await forwarder.send(event)
+        assert event_size_bytes(event) < MAX_EVENT_BYTES
+    assert [event["messageCostUsd"] for event in sent_events(ws)] == pytest.approx([0.0002, 0.0004])
+    assert state.cost_complete
+
+
+@pytest.mark.parametrize("extra_bytes", [0, 1])
+def test_pricing_snapshot_byte_limit(pricing_model, extra_bytes):
+    snapshot = {
+        "source": "models.dev",
+        "model": "openai/gpt-6.1-sol",
+        "rates": {**pricing_model["cost"], "extra": ""},
+    }
+    snapshot["rates"]["extra"] = "x" * (
+        MAX_PRICING_SNAPSHOT_BYTES - event_size_bytes(snapshot) + extra_bytes
+    )
+    state = CodexTurnEvents(
+        "m", "thread", "turn", "gpt-6.1-sol", {}, pricing_model={"cost": snapshot["rates"]}
+    )
+    event = usage(state, counts(100), counts(100))
+    assert ("pricing" in event) is (extra_bytes == 0)
+    assert event["messageCostUsd"] == pytest.approx(0.0002)
 
 
 @pytest.mark.parametrize("third_input,third_rate", [(100_000, 2), (100_001, 4)])

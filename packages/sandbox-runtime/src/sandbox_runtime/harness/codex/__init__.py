@@ -428,6 +428,9 @@ class CodexHarness:
                     self._total,
                     baseline_known=baseline_known,
                     pricing_model=pricing.get(model),
+                    pricing_source="custom"
+                    if self._environ.get("OPENCODE_MODELS_PATH")
+                    else "models.dev",
                 )
                 await emit(state.start())
                 # The transport queue retains notifications delivered before the
