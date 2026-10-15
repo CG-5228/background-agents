@@ -1,6 +1,5 @@
 import {
   skillImportProvenanceSchema,
-  skillImportSourceSchema,
   skillMetadataSchema,
   type CreateSkillInput,
   type ImportedSkillIdentity,
@@ -17,10 +16,20 @@ import {
 } from "@open-inspect/shared/types/skills";
 import { generateId } from "../auth/crypto";
 import { buildValidatedSkillRevision } from "../skills/content-addressing";
-import { bulkInsertStatements } from "./bulk-insert";
+import {
+  catalogInsert,
+  revisionInsert,
+  fileInserts,
+  assignmentInserts,
+  importSourceInsert,
+  importedSkillStatements,
+  type ImportedSkillCreateInput,
+} from "./skill-write-statements";
 import { isForeignKeyConstraintError, isUniqueConstraintError } from "./errors";
 import { MAX_D1_QUERY_PARAMETERS } from "./query-limits";
 import type { SqlDatabase, SqlStatement } from "./sql-database";
+
+export type { ImportedSkillCreateInput } from "./skill-write-statements";
 
 const RESERVED_SKILL_NAMES = new Set([
   "agent-browser",
@@ -95,11 +104,6 @@ interface CurrentSkillRevisionRow {
 
 export class SkillConflictError extends Error {}
 export class SkillValidationError extends Error {}
-export interface ImportedSkillCreateInput {
-  name: string;
-  content: SkillContentInput;
-  source: SkillImportSource;
-}
 interface ApplicableSkill {
   id: string;
   name: string;
@@ -199,20 +203,14 @@ export class SkillStore {
     const now = Date.now();
     try {
       await this.db.batch([
-        this.db
-          .prepare(
-            `INSERT INTO skills
-             (id, name, current_revision_id, enabled, deleted_at, created_by, updated_by, created_at, updated_at)
-             VALUES (?, ?, NULL, 1, NULL, ?, ?, ?, ?)`
-          )
-          .bind(id, input.name, actorUserId, actorUserId, now, now),
-        this.revisionInsert(revisionId, id, 1, input.content, revision, actorUserId, now),
-        ...this.fileInserts(revisionId, revision.files),
+        catalogInsert(this.db, id, input.name, actorUserId, now),
+        revisionInsert(this.db, revisionId, id, 1, input.content, revision, actorUserId, now),
+        ...fileInserts(this.db, revisionId, revision.files),
         this.db
           .prepare("UPDATE skills SET current_revision_id = ? WHERE id = ?")
           .bind(revisionId, id),
-        ...this.assignmentInserts(id, input.assignments, actorUserId, now),
-        ...(source ? [this.importSourceInsert(revisionId, id, source, now)] : []),
+        ...assignmentInserts(this.db, id, input.assignments, actorUserId, now),
+        ...(source ? [importSourceInsert(this.db, revisionId, id, source, now)] : []),
         this.bumpGeneration(),
       ]);
     } catch (error) {
@@ -272,92 +270,7 @@ export class SkillStore {
       id: `skill_${generateId()}`,
       revisionId: `skillrev_${generateId()}`,
     }));
-    const statements: SqlStatement[] = [
-      ...bulkInsertStatements(
-        this.db,
-        "skills",
-        records.map((record) => ({
-          id: record.id,
-          name: record.input.name,
-          current_revision_id: null,
-          enabled: 1,
-          deleted_at: null,
-          created_by: actorUserId,
-          updated_by: actorUserId,
-          created_at: now,
-          updated_at: now,
-        }))
-      ),
-      ...bulkInsertStatements(
-        this.db,
-        "skill_revisions",
-        records.map((record) => ({
-          id: record.revisionId,
-          skill_id: record.id,
-          revision_number: 1,
-          revision_sha256: record.revision.revisionSha256,
-          description: record.input.content.description,
-          body: record.input.content.body,
-          license: record.input.content.license ?? null,
-          compatibility: record.input.content.compatibility ?? null,
-          metadata_json: JSON.stringify(record.input.content.metadata),
-          total_bytes: record.revision.totalBytes,
-          created_by: actorUserId,
-          created_at: now,
-        }))
-      ),
-      ...bulkInsertStatements(
-        this.db,
-        "skill_revision_files",
-        records.flatMap((record) =>
-          record.revision.files.map((file) => ({
-            revision_id: record.revisionId,
-            path: file.path,
-            content: file.content,
-            content_sha256: file.sha256,
-            size_bytes: file.sizeBytes,
-            executable: file.executable ? 1 : 0,
-          }))
-        )
-      ),
-      ...this.currentRevisionUpdates(records),
-      ...bulkInsertStatements(
-        this.db,
-        "skill_assignments",
-        records.flatMap((record) =>
-          assignments.map((assignment) => ({
-            id: `skillassign_${generateId()}`,
-            skill_id: record.id,
-            scope_type: assignment.type,
-            repo_owner: assignment.type === "repository" ? assignment.repository.repoOwner : null,
-            repo_name: assignment.type === "repository" ? assignment.repository.repoName : null,
-            environment_id: assignment.type === "environment" ? assignment.environmentId : null,
-            created_by: actorUserId,
-            created_at: now,
-          }))
-        )
-      ),
-      ...bulkInsertStatements(
-        this.db,
-        "skill_import_sources",
-        records.map((record) => {
-          const source = skillImportSourceSchema.parse(record.input.source);
-          return {
-            revision_id: record.revisionId,
-            skill_id: record.id,
-            provider: source.provider,
-            repo_owner: source.repoOwner,
-            repo_name: source.repoName,
-            requested_ref: source.requestedRef,
-            resolved_ref: source.resolvedRef,
-            commit_sha: source.commitSha,
-            subdirectory: source.subdirectory,
-            source_sha256: source.sourceSha256,
-            imported_at: now,
-          };
-        })
-      ),
-    ];
+    const statements = importedSkillStatements(this.db, records, assignments, actorUserId, now);
     statements.push(this.bumpGeneration());
 
     try {
@@ -433,7 +346,8 @@ export class SkillStore {
       const revisionId = `skillrev_${generateId()}`;
       resultingRevisionId = revisionId;
       statements.push(
-        this.revisionInsert(
+        revisionInsert(
+          this.db,
           revisionId,
           id,
           current.revisionNumber + 1,
@@ -443,7 +357,7 @@ export class SkillStore {
           now,
           expectedRevisionId
         ),
-        ...this.fileInserts(revisionId, revision.files)
+        ...fileInserts(this.db, revisionId, revision.files)
       );
       updateResultIndex = statements.length;
       statements.push(
@@ -464,7 +378,7 @@ export class SkillStore {
            )`
         )
         .bind(id, id, resultingRevisionId),
-      ...this.assignmentInserts(id, input.assignments, actorUserId, now, resultingRevisionId),
+      ...assignmentInserts(this.db, id, input.assignments, actorUserId, now, resultingRevisionId),
       this.bumpGeneration(id, resultingRevisionId)
     );
     let results: Awaited<ReturnType<SqlDatabase["batch"]>>;
@@ -514,7 +428,8 @@ export class SkillStore {
     const now = Date.now();
     const revisionId = `skillrev_${generateId()}`;
     const statements: SqlStatement[] = [
-      this.revisionInsert(
+      revisionInsert(
+        this.db,
         revisionId,
         id,
         current.revision_number + 1,
@@ -524,7 +439,7 @@ export class SkillStore {
         now,
         expectedRevisionId
       ),
-      ...this.fileInserts(revisionId, revision.files),
+      ...fileInserts(this.db, revisionId, revision.files),
     ];
     const updateResultIndex = statements.length;
     statements.push(
@@ -534,7 +449,7 @@ export class SkillStore {
            WHERE id = ? AND current_revision_id = ? AND deleted_at IS NULL`
         )
         .bind(revisionId, actorUserId, now, id, expectedRevisionId),
-      this.importSourceInsert(revisionId, id, source, now),
+      importSourceInsert(this.db, revisionId, id, source, now),
       this.bumpGeneration(id, revisionId)
     );
     let results: Awaited<ReturnType<SqlDatabase["batch"]>>;
@@ -840,39 +755,6 @@ export class SkillStore {
       .first<CurrentSkillRevisionRow>();
   }
 
-  /** Record where a revision's content was imported from. */
-  private importSourceInsert(
-    revisionId: string,
-    skillId: string,
-    source: SkillImportSource,
-    now: number
-  ): SqlStatement {
-    const validatedSource = skillImportSourceSchema.parse(source);
-    return this.db
-      .prepare(
-        `INSERT INTO skill_import_sources
-          (revision_id, skill_id, provider, repo_owner, repo_name, requested_ref,
-           resolved_ref, commit_sha, subdirectory, source_sha256, imported_at)
-          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-          WHERE EXISTS (SELECT 1 FROM skill_revisions WHERE id = ? AND skill_id = ?)`
-      )
-      .bind(
-        revisionId,
-        skillId,
-        validatedSource.provider,
-        validatedSource.repoOwner,
-        validatedSource.repoName,
-        validatedSource.requestedRef,
-        validatedSource.resolvedRef,
-        validatedSource.commitSha,
-        validatedSource.subdirectory,
-        validatedSource.sourceSha256,
-        now,
-        revisionId,
-        skillId
-      );
-  }
-
   private async assignmentsForSkill(skillId: string): Promise<SkillAssignment[]> {
     return (await this.assignmentsForSkills([skillId])).get(skillId) ?? [];
   }
@@ -956,125 +838,6 @@ export class SkillStore {
     if (found !== environmentIds.length) {
       throw new SkillValidationError("One or more assigned environments do not exist");
     }
-  }
-
-  private revisionInsert(
-    revisionId: string,
-    skillId: string,
-    revisionNumber: number,
-    content: SkillContentInput,
-    revision: Awaited<ReturnType<typeof buildValidatedSkillRevision>>,
-    actorUserId: string,
-    now: number,
-    expectedCurrentRevisionId: string | null = null
-  ): SqlStatement {
-    return this.db
-      .prepare(
-        `INSERT INTO skill_revisions
-         (id, skill_id, revision_number, revision_sha256, description, body, license,
-          compatibility, metadata_json, total_bytes, created_by, created_at)
-          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-          WHERE ? IS NULL OR EXISTS (
-            SELECT 1 FROM skills
-            WHERE id = ? AND current_revision_id = ? AND deleted_at IS NULL
-          )`
-      )
-      .bind(
-        revisionId,
-        skillId,
-        revisionNumber,
-        revision.revisionSha256,
-        content.description,
-        content.body,
-        content.license ?? null,
-        content.compatibility ?? null,
-        JSON.stringify(content.metadata),
-        revision.totalBytes,
-        actorUserId,
-        now,
-        expectedCurrentRevisionId,
-        skillId,
-        expectedCurrentRevisionId
-      );
-  }
-
-  private currentRevisionUpdates(
-    records: readonly { id: string; revisionId: string }[]
-  ): SqlStatement[] {
-    const recordsPerStatement = Math.floor(MAX_D1_QUERY_PARAMETERS / 3);
-    const statements: SqlStatement[] = [];
-    for (let start = 0; start < records.length; start += recordsPerStatement) {
-      const chunk = records.slice(start, start + recordsPerStatement);
-      const cases = chunk.map(() => "WHEN ? THEN ?").join(" ");
-      const placeholders = chunk.map(() => "?").join(", ");
-      statements.push(
-        this.db
-          .prepare(
-            `UPDATE skills SET current_revision_id = CASE id ${cases} END
-             WHERE id IN (${placeholders})`
-          )
-          .bind(
-            ...chunk.flatMap((record) => [record.id, record.revisionId]),
-            ...chunk.map((record) => record.id)
-          )
-      );
-    }
-    return statements;
-  }
-
-  private fileInserts(revisionId: string, files: SkillFile[]): SqlStatement[] {
-    return files.map((file) =>
-      this.db
-        .prepare(
-          `INSERT INTO skill_revision_files
-            (revision_id, path, content, content_sha256, size_bytes, executable)
-            SELECT ?, ?, ?, ?, ?, ?
-            WHERE EXISTS (SELECT 1 FROM skill_revisions WHERE id = ?)`
-        )
-        .bind(
-          revisionId,
-          file.path,
-          file.content,
-          file.sha256,
-          file.sizeBytes,
-          file.executable ? 1 : 0,
-          revisionId
-        )
-    );
-  }
-
-  private assignmentInserts(
-    skillId: string,
-    assignments: SkillAssignmentInput[],
-    actorUserId: string,
-    now: number,
-    requiredCurrentRevisionId?: string
-  ): SqlStatement[] {
-    return assignments.map((assignment) => {
-      const id = `skillassign_${generateId()}`;
-      return this.db
-        .prepare(
-          `INSERT INTO skill_assignments
-            (id, skill_id, scope_type, repo_owner, repo_name, environment_id, created_by, created_at)
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?
-            WHERE ? IS NULL OR EXISTS (
-              SELECT 1 FROM skills WHERE id = ? AND current_revision_id = ? AND deleted_at IS NULL
-            )`
-        )
-        .bind(
-          id,
-          skillId,
-          assignment.type,
-          assignment.type === "repository" ? assignment.repository.repoOwner : null,
-          assignment.type === "repository" ? assignment.repository.repoName : null,
-          assignment.type === "environment" ? assignment.environmentId : null,
-          actorUserId,
-          now,
-          requiredCurrentRevisionId ?? null,
-          skillId,
-          requiredCurrentRevisionId ?? null
-        );
-    });
   }
 
   private bumpGeneration(skillId?: string, requiredCurrentRevisionId?: string): SqlStatement {

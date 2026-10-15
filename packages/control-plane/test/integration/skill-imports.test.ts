@@ -250,6 +250,71 @@ describe("managed skill import provenance", () => {
     expect(await store.catalogGeneration()).toBeGreaterThan(0);
   });
 
+  it("uses the same persisted content and provenance fields for single and bulk imports", async () => {
+    const store = new SkillStore(env.DB);
+    const richContent = {
+      ...content,
+      license: "MIT",
+      compatibility: "Requires a POSIX shell",
+      metadata: { team: "platform", note: "déploiement" },
+      files: [
+        ...content.files,
+        { path: "references/checklist.md", content: "Review ✓\n", executable: false },
+      ],
+    };
+    const pinnedSource: SkillImportSource = {
+      ...source,
+      provider: "gitlab",
+      repoOwner: "group/subgroup",
+      requestedRef: "release",
+      resolvedRef: "release",
+    };
+    const assignments = [
+      { type: "global" as const },
+      {
+        type: "repository" as const,
+        repository: { repoOwner: "group/subgroup", repoName: "app", baseBranch: null },
+      },
+    ];
+    const single = await store.create(
+      { name: "single-import", content: richContent, assignments },
+      "user_1",
+      pinnedSource
+    );
+    const [bulk] = await store.createImportedSkills(
+      [{ name: "bulk-import", content: richContent, source: pinnedSource }],
+      assignments,
+      "user_1"
+    );
+    for (const skill of [single, await store.get(bulk.id)]) {
+      expect(skill).toMatchObject({
+        description: richContent.description,
+        body: richContent.body,
+        license: richContent.license,
+        compatibility: richContent.compatibility,
+        metadata: richContent.metadata,
+        createdBy: "user_1",
+        updatedBy: "user_1",
+        revisionCreatedBy: "user_1",
+        revisionNumber: 1,
+        enabled: true,
+        source: pinnedSource,
+        assignments: expect.arrayContaining([
+          expect.objectContaining({ type: "global" }),
+          expect.objectContaining({
+            type: "repository",
+            repoOwner: "group/subgroup",
+            repoName: "app",
+          }),
+        ]),
+        files: expect.arrayContaining(
+          richContent.files.map((file) => expect.objectContaining(file))
+        ),
+      });
+      expect(skill?.source?.revisionId).toBe(skill?.currentRevisionId);
+    }
+  });
+
   it("stores none of a collection when any selected name conflicts", async () => {
     const store = new SkillStore(env.DB);
     await importedSkill(store, "already-there");
