@@ -7,6 +7,7 @@ import {
 } from "./sessions";
 import { teamIdSchema } from "./team-id";
 import { sessionVisibilitySchema } from "./teams";
+import { repositoryPairInputSchema } from "./repositories";
 
 /** Viewer-specific session row in session inbox page and snapshot payloads. */
 export const sessionInboxSessionSchema = sessionSummaryBaseSchema.extend({
@@ -51,13 +52,19 @@ export type SessionInboxSnapshot = z.infer<typeof sessionInboxSnapshotSchema>;
  * the viewer, including sessions on pages the client has not loaded. The
  * filters mirror the inbox query parameters.
  */
-export const sessionInboxMarkReadRequestSchema = z.strictObject({
-  mine: z.boolean().optional(),
-  teamIds: z.array(teamIdSchema).max(MAX_SESSION_LIST_FILTER_IDS).optional(),
-  ownerFilter: z.enum(["started", "participating", "anyone"]).optional(),
-  visibility: sessionVisibilitySchema.optional(),
-  scope: z.enum(["workspace", "all"]).optional(),
-});
+export const sessionInboxMarkReadRequestSchema = z
+  .strictObject({
+    repoOwner: repositoryPairInputSchema.shape.repoOwner.pipe(z.string().max(256)).optional(),
+    repoName: repositoryPairInputSchema.shape.repoName.pipe(z.string().max(256)).optional(),
+    mine: z.boolean().optional(),
+    teamIds: z.array(teamIdSchema).max(MAX_SESSION_LIST_FILTER_IDS).optional(),
+    ownerFilter: z.enum(["started", "participating", "anyone"]).optional(),
+    visibility: sessionVisibilitySchema.optional(),
+    scope: z.enum(["workspace", "all"]).optional(),
+  })
+  .refine((filters) => (filters.repoOwner === undefined) === (filters.repoName === undefined), {
+    message: "repoOwner and repoName must be provided together",
+  });
 export type SessionInboxMarkReadRequest = z.infer<typeof sessionInboxMarkReadRequestSchema>;
 
 export const sessionInboxMarkReadResponseSchema = z.object({

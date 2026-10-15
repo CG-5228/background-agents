@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import { useAuthSession } from "@/lib/auth-session";
+import { useRepositoryHome } from "./use-repository-home";
 import { useActiveTeam } from "./use-active-team";
 import useSWR, { mutate, useSWRConfig } from "swr";
 import type {
@@ -195,11 +196,17 @@ function useCategoryPagination(
 }
 
 export function useSidebarSessions() {
+  const { repoFullName, repository } = useRepositoryHome();
   const { data: authSession } = useAuthSession();
   const { activeTeamId, scope, loading: loadingTeams, error: teamsError } = useActiveTeam();
   const filters = useMemo(
-    () => ({ teamIds: activeTeamId ? [activeTeamId] : undefined, scope }),
-    [activeTeamId, scope]
+    () => ({
+      teamIds: activeTeamId ? [activeTeamId] : undefined,
+      scope,
+      repoOwner: repository?.repoOwner,
+      repoName: repository?.repoName,
+    }),
+    [activeTeamId, scope, repository?.repoOwner, repository?.repoName]
   );
   const { fetcher, mutate: mutateCache } = useSWRConfig();
   const [sessionCreatorFilter, setSessionCreatorFilterState] =
@@ -227,7 +234,11 @@ export function useSidebarSessions() {
   }, []);
 
   const enabled =
-    Boolean(authSession) && sessionCreatorFilter !== null && !loadingTeams && !teamsError;
+    (repoFullName === null || repository !== null) &&
+    Boolean(authSession) &&
+    sessionCreatorFilter !== null &&
+    !loadingTeams &&
+    !teamsError;
   const mine = sessionCreatorFilter === "mine";
   const snapshotKey = enabled ? buildSessionInboxSnapshotKey(mine, filters) : null;
   const {

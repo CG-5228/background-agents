@@ -47,6 +47,24 @@ describe("mark session inbox read", () => {
     await serviceFetch("https://example.com/sessions/inbox?category=finished");
   });
 
+  it("leaves other repositories unread when marking a repository home read", async () => {
+    const store = new SessionIndexStore(env.DB);
+    await createUnread(store, session("other"));
+    await createUnread(store, session("site", { repoOwner: "group/subgroup", repoName: "site" }));
+    expect(
+      await (await markRead({ repoOwner: "GROUP/SUBGROUP", repoName: "SITE" })).json()
+    ).toEqual({ markedCount: 1 });
+    expect(await readSessionIds()).toEqual(["site"]);
+    expect(await attentionRootIds()).toEqual(["other"]);
+  });
+
+  it("rejects incomplete repository filters without marking anything read", async () => {
+    const store = new SessionIndexStore(env.DB);
+    await createUnread(store, session("other"));
+    expect((await markRead({ repoOwner: "acme" })).status).toBe(400);
+    expect(await readSessionIds()).toEqual([]);
+  });
+
   it("marks every unread session, including unloaded pages and descendants", async () => {
     const store = new SessionIndexStore(env.DB);
     const rootCount = SESSION_INBOX_LIMIT + 2;

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRepositoryHome } from "@/hooks/use-repository-home";
 import { useState, useCallback, useEffect, useRef, type TouchEvent } from "react";
 import { ArchiveSessionDialog } from "@/components/archive-session-dialog";
 import { archiveSession } from "@/lib/archive-session";
@@ -42,6 +43,7 @@ export function SessionListItem({
   onSessionSelect?: () => void;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
 }) {
+  const { repoFullName } = useRepositoryHome();
   const canManageLifecycle = session.capabilities?.canManageLifecycle ?? false;
   const canMarkRead = session.capabilities?.canRead === true && session.readState.unread;
   const timestamp = session.updatedAt || session.createdAt;
@@ -239,7 +241,7 @@ export function SessionListItem({
           </>
         ) : (
           <Link
-            href={buildSessionHref(session)}
+            href={buildSessionHref(session, repoFullName)}
             onClick={(event) => {
               if (longPressTriggeredRef.current) {
                 event.preventDefault();
@@ -389,6 +391,7 @@ export function ChildSessionListItem({
   depth: number;
   onMarkLatestMessageRead: (sessionId: string) => Promise<void>;
 }) {
+  const { repoFullName } = useRepositoryHome();
   const [isMarkingLatestRead, setIsMarkingLatestRead] = useState(false);
   const canMarkRead = session.capabilities?.canRead === true && session.readState.unread;
   const timestamp = session.updatedAt || session.createdAt;
@@ -410,7 +413,7 @@ export function ChildSessionListItem({
   return (
     <div className="group relative">
       <Link
-        href={buildSessionHref(session)}
+        href={buildSessionHref(session, repoFullName)}
         onClick={() => {
           if (isMobile) onSessionSelect?.();
         }}

@@ -1,5 +1,6 @@
 "use client";
 
+import { repositoryHomeHref, useRepositoryHome } from "@/hooks/use-repository-home";
 import { useAuthSession } from "@/lib/auth-session";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
@@ -98,6 +99,7 @@ export default function Home() {
   const { hasPermission } = useCurrentUserAuthorization();
   const canCreateSession = hasPermission("sessions.create");
   const router = useRouter();
+  const { repoFullName, scopedHref } = useRepositoryHome();
   const teamContext = useActiveTeam();
   const { teams, requireTeamOnCreate, loading: loadingTeams, error: teamError } = teamContext;
   const [accessDraft, setAccessDraft] = useState<ComposerAccessDraft | null>(null);
@@ -106,6 +108,7 @@ export default function Home() {
   const teamCreationReady =
     !loadingTeams && !teamError && (teamId === null ? !requireTeamOnCreate : !!selectedTeam);
   const picker = useSessionTargetPicker({
+    lockedRepoFullName: repoFullName,
     teamId,
     defaultEnvironmentId: selectedTeam?.defaultEnvironmentId,
   });
@@ -235,7 +238,7 @@ export default function Home() {
           sessionAttachments.clearAttachments();
           mutate(isUnarchivedSessionListKey);
           mutate(isSessionInboxKey);
-          router.push(`/session/${sessionId}`);
+          router.push(scopedHref(`/session/${sessionId}`));
         },
         denied: toast.error,
       },
@@ -404,6 +407,7 @@ function HomeContent({
   ) => void;
   providerAccounts: { accounts: ModelProviderAccount[]; defaults: ModelProviderAccountDefault[] };
 }) {
+  const { repoFullName } = useRepositoryHome();
   const { isOpen } = useSidebarContext();
   const { shortcuts, labels } = useKeyboardShortcuts();
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -450,7 +454,9 @@ function HomeContent({
         <div className="w-full max-w-2xl">
           {/* Welcome text */}
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-semibold text-foreground mb-2">Welcome to {APP_NAME}</h1>
+            <h1 className="text-3xl font-semibold text-foreground mb-2">
+              {repoFullName === null ? `Welcome to ${APP_NAME}` : repoFullName || "Repository home"}
+            </h1>
             {isAuthenticated && canCreateSession ? (
               <p className="text-muted-foreground">
                 Ask a question or describe what you want to build
@@ -480,6 +486,19 @@ function HomeContent({
 
               <div className="mb-3 flex flex-wrap items-center gap-2 px-4 sm:gap-4">
                 <SessionTargetPicker {...picker} disabled={creating} />
+                {repoFullName === null && picker.sessionTarget?.kind === "repo" && (
+                  <Link
+                    className="text-xs text-muted-foreground underline"
+                    href={repositoryHomeHref("/", picker.sessionTarget.repoFullName)}
+                  >
+                    Open repository home
+                  </Link>
+                )}
+                {repoFullName !== null && (
+                  <Link className="text-xs text-muted-foreground underline" href="/">
+                    All repositories
+                  </Link>
+                )}
               </div>
 
               <div

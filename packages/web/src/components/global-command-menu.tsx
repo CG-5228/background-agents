@@ -33,7 +33,7 @@ interface GlobalCommandMenuProps {
   onNavigate: (href: string) => void;
   onNewSession: () => void;
   sessions: SessionListItem[];
-  teamContext?: Pick<SessionDiscoveryQuery, "teamIds" | "scope">;
+  teamContext?: Partial<Pick<SessionDiscoveryQuery, "teamIds" | "scope" | "repository">>;
 }
 
 function buildSessionUrl(session: SessionListItem): string {

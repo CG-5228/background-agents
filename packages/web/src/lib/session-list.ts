@@ -98,9 +98,11 @@ export function buildSessionSearchValue(session: SessionListItem): string {
  * session payload loads.
  */
 export function buildSessionHref(
-  session: Pick<SessionListItem, "id" | "title" | "repoOwner" | "repoName">
+  session: Pick<SessionListItem, "id" | "title" | "repoOwner" | "repoName">,
+  homeRepo: string | null = null
 ) {
   const query: Record<string, string> = {};
+  if (homeRepo !== null) query.homeRepo = homeRepo;
   if (session.repoOwner && session.repoName) {
     query.repoOwner = session.repoOwner;
     query.repoName = session.repoName;

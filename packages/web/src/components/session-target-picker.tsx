@@ -26,31 +26,36 @@ export function SessionTargetPicker({
   repositoryGrantError,
   selectionError,
   disabled,
+  targetLocked = false,
 }: SessionTargetPickerProps & { disabled: boolean }) {
   return (
     <>
       {/* Target selector */}
-      <Combobox
-        value={targetSelectValue}
-        onChange={(value) => onTargetSelectValueChange(value)}
-        items={targetOptions}
-        searchable
-        searchPlaceholder="Search environments and repositories..."
-        filterFn={(option, query) =>
-          option.label.toLowerCase().includes(query) ||
-          (option.description?.toLowerCase().includes(query) ?? false) ||
-          String(option.value).toLowerCase().includes(query)
-        }
-        direction="down"
-        dropdownWidth="w-72"
-        disabled={disabled || loadingRepos}
-        triggerClassName="flex max-w-full items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition"
-      >
-        <span className="truncate max-w-[12rem] sm:max-w-none">
-          {loadingRepos ? "Loading..." : displayTargetName}
-        </span>
-        <ChevronDownIcon className="w-3 h-3" />
-      </Combobox>
+      {targetLocked ? (
+        <span className="text-sm text-muted-foreground">{displayTargetName}</span>
+      ) : (
+        <Combobox
+          value={targetSelectValue}
+          onChange={(value) => onTargetSelectValueChange(value)}
+          items={targetOptions}
+          searchable
+          searchPlaceholder="Search environments and repositories..."
+          filterFn={(option, query) =>
+            option.label.toLowerCase().includes(query) ||
+            (option.description?.toLowerCase().includes(query) ?? false) ||
+            String(option.value).toLowerCase().includes(query)
+          }
+          direction="down"
+          dropdownWidth="w-72"
+          disabled={disabled || loadingRepos}
+          triggerClassName="flex max-w-full items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition"
+        >
+          <span className="truncate max-w-[12rem] sm:max-w-none">
+            {loadingRepos ? "Loading..." : displayTargetName}
+          </span>
+          <ChevronDownIcon className="w-3 h-3" />
+        </Combobox>
+      )}
 
       {repositoryGrantError && (
         <p role="alert" className="max-w-full text-xs text-destructive">

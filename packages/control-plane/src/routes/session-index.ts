@@ -52,6 +52,8 @@ import type { InboxFilterOptions, ListSessionInboxResult } from "../db/session-i
 import { recordShadowListDenials } from "../authorization/session-shadow-audit";
 
 const sessionInboxQuerySchema = z.object({
+  repoOwner: sessionInboxMarkReadRequestSchema.shape.repoOwner,
+  repoName: sessionInboxMarkReadRequestSchema.shape.repoName,
   category: z
     .string()
     .optional()
@@ -241,6 +243,9 @@ async function resolveInboxFilterOptions(
   ctx: UserRouteContext,
   filters: SessionInboxMarkReadRequest
 ): Promise<(InboxFilterOptions & { readScope: SessionViewer }) | Response> {
+  if ((filters.repoOwner === undefined) !== (filters.repoName === undefined)) {
+    return error("repoOwner and repoName must be provided together", 400);
+  }
   const viewer = viewerFromContext(
     ctx,
     (ctx.sessionMemberships ??= await new TeamMembershipStore(ctx.db).listForUser(
@@ -251,6 +256,10 @@ async function resolveInboxFilterOptions(
     return error("Invalid scope", 403);
   }
   return {
+    repository:
+      filters.repoOwner && filters.repoName
+        ? { repoOwner: filters.repoOwner, repoName: filters.repoName }
+        : undefined,
     createdByUserIds: filters.mine ? [ctx.principal.userId] : [],
     excludeAutomatedSessions: filters.mine === true,
     viewerUserId: ctx.principal.userId,
@@ -271,7 +280,7 @@ export async function handleListSessionInbox(
 ): Promise<Response> {
   const query = parseQuery(request, sessionInboxQuerySchema);
   if (query instanceof Response) return query;
-  const { category, mine, ownerFilter, visibility, scope } = query;
+  const { category, mine, ownerFilter, visibility, scope, repoOwner, repoName } = query;
   if (query.cursor !== undefined && category === null) {
     return error("Category required for pagination", 400);
   }
@@ -282,6 +291,8 @@ export async function handleListSessionInbox(
     return error("Invalid teamIds[]", 400);
   }
   const filterOptions = await resolveInboxFilterOptions(env, ctx, {
+    repoOwner,
+    repoName,
     mine: mine === "true",
     teamIds,
     ownerFilter,

@@ -9,6 +9,7 @@ import type {
   SessionInboxPage,
   SessionInboxSnapshot,
 } from "@open-inspect/shared/types/session-inbox";
+import { RepositoryHomeProvider } from "./use-repository-home";
 import { useSidebarSessions } from "./use-sidebar-sessions";
 import { reconcileSessionReadState } from "@/lib/session-read-state";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
@@ -19,6 +20,9 @@ vi.mock("@/lib/browser-api-fetch", () => ({ browserApiFetch: vi.fn() }));
 vi.mock("@/lib/auth-session", () => ({
   useAuthSession: () => ({ data: { user: { id: "github:123", name: "Test User" } } }),
 }));
+
+const home = vi.hoisted(() => ({ query: "" }));
+vi.mock("next/navigation", () => ({ useSearchParams: () => new URLSearchParams(home.query) }));
 
 const teamContext = vi.hoisted(() => ({
   activeTeamId: null as string | null,
@@ -103,7 +107,7 @@ function wrapper(fetcher: (key: string) => unknown, cache = new Map()) {
           focusThrottleInterval: 0,
         }}
       >
-        {children}
+        <RepositoryHomeProvider>{children}</RepositoryHomeProvider>
       </SWRConfig>
     );
   };
@@ -129,11 +133,37 @@ afterEach(() => {
   setVisibility("visible");
   vi.restoreAllMocks();
   vi.useRealTimers();
+  home.query = "";
   teamContext.activeTeamId = null;
   teamContext.scope = undefined;
 });
 
 describe("useSidebarSessions", () => {
+  it("scopes snapshots, cursor pages and bulk reads to the repository home", async () => {
+    home.query = "homeRepo=group%2Fsubgroup%2Fsite";
+    const fetcher = vi.fn(async (key: string) =>
+      key.includes("category=") ? page(["tail"]) : snapshot({ finished: page(["head"], "next") })
+    );
+    const { result } = renderHook(() => useSidebarSessions(), { wrapper: wrapper(fetcher) });
+    await waitFor(() => expect(result.current.finished).toHaveLength(1));
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/sessions/inbox?repoOwner=group%2Fsubgroup&repoName=site"
+    );
+    act(() => result.current.sectionPagination.finished.loadMore());
+    await waitFor(() => expect(result.current.finished).toHaveLength(2));
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/sessions/inbox?category=finished&cursor=next&repoOwner=group%2Fsubgroup&repoName=site"
+    );
+    vi.mocked(browserApiFetch).mockResolvedValue(Response.json({ markedCount: 0 }));
+    await act(() => result.current.handleMarkAllAttentionRead());
+    expect(browserApiFetch).toHaveBeenCalledWith(
+      "/api/sessions/inbox/read-state",
+      expect.objectContaining({
+        body: JSON.stringify({ repoOwner: "group/subgroup", repoName: "site", mine: false }),
+      })
+    );
+  });
+
   it("uses the selected team for snapshot and cursor requests and drops retained pages on switches", async () => {
     teamContext.activeTeamId = "team_alpha";
     const fetcher = vi.fn(async (key: string) =>

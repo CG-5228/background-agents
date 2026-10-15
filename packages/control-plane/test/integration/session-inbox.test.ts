@@ -11,6 +11,77 @@ import { VIEWER_ID, viewer, seedTeams, session } from "./session-inbox-test-help
 describe("session inbox", () => {
   beforeEach(cleanD1Tables);
 
+  it.each(["repoOwner=acme", "repoName=site", "repoOwner=&repoName=site"])(
+    "rejects incomplete repository inbox filters: %s",
+    async (query) => {
+      const response = await serviceFetch(`https://example.com/sessions/inbox?${query}`);
+      expect(response.status).toBe(400);
+    }
+  );
+
+  it("applies the repository filter at the inbox HTTP boundary", async () => {
+    await serviceFetch("https://example.com/sessions/inbox");
+    const store = new SessionIndexStore(env.DB);
+    await store.create(session("other-repo", { updatedAt: 4000 }));
+    await store.create(
+      session("site", { repoOwner: "group/subgroup", repoName: "site", updatedAt: 3000 })
+    );
+    const response = await serviceFetch(
+      "https://example.com/sessions/inbox?repoOwner=group%2Fsubgroup&repoName=site"
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      categories: Record<SessionInboxCategory, { items: Array<{ rootSession: { id: string } }> }>;
+    };
+    expect(body.categories.finished.items.map(({ rootSession }) => rootSession.id)).toEqual([
+      "site",
+    ]);
+  });
+
+  it("filters repository homes before rerooting and paging, including member repositories", async () => {
+    await seedTeams();
+    const store = new SessionIndexStore(env.DB);
+    await store.create(session("other", { updatedAt: 9000 }));
+    await store.create(
+      session("site-child", {
+        parentSessionId: "other",
+        spawnDepth: 1,
+        repoOwner: "group/subgroup",
+        repoName: "site",
+        updatedAt: 8000,
+      })
+    );
+    await store.create(
+      session("multi", {
+        updatedAt: 7000,
+        repositories: [
+          { repoOwner: "open-inspect", repoName: "open-inspect", repoId: 1, baseBranch: "main" },
+          { repoOwner: "group/subgroup", repoName: "site", repoId: 2, baseBranch: "main" },
+        ],
+      })
+    );
+    const inbox = new SessionInboxStore(env.DB);
+    const options = {
+      readScope: viewer,
+      mode: "on" as const,
+      viewerUserId: VIEWER_ID,
+      limit: 1,
+      repository: { repoOwner: "GROUP/SUBGROUP", repoName: "SITE" },
+    };
+    const snapshot = await inbox.snapshot(options);
+    expect(snapshot.finished.items.map(({ rootSession }) => rootSession.id)).toEqual([
+      "site-child",
+    ]);
+    expect(snapshot.finished.hasMore).toBe(true);
+    const next = await inbox.list({
+      ...options,
+      category: "finished",
+      cursor: snapshot.finished.nextCursor,
+    });
+    expect(next.items.map(({ rootSession }) => rootSession.id)).toEqual(["multi"]);
+    expect(next.hasMore).toBe(false);
+  });
+
   it("excludes hidden roots and children before category aggregation and reroots visible descendants", async () => {
     await seedTeams();
     const store = new SessionIndexStore(env.DB);

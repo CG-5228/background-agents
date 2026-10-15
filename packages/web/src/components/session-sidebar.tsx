@@ -24,6 +24,7 @@ import { MarkAllReadButton } from "@/components/mark-all-read-button";
 import { UserMenu } from "@/components/sidebar-user-menu";
 import { useCurrentUserAuthorization } from "@/hooks/use-current-user-authorization";
 import { buildSessionsHref } from "@/lib/session-discovery";
+import { useRepositoryHome } from "@/hooks/use-repository-home";
 import { useActiveTeam } from "@/hooks/use-active-team";
 import { TeamSwitcher } from "./team-switcher";
 
@@ -92,7 +93,8 @@ export function SessionSidebar({
   const { data: authSession } = useAuthSession();
   const { hasPermission } = useCurrentUserAuthorization();
   const { activeTeamId, scope, teams } = useActiveTeam();
-  const teamQuery = { teamIds: activeTeamId ? [activeTeamId] : undefined, scope };
+  const { repoFullName, repository, scopedHref } = useRepositoryHome();
+  const teamQuery = { teamIds: activeTeamId ? [activeTeamId] : undefined, scope, repository };
   const pathname = usePathname();
   const router = useRouter();
   const isMobile = useIsMobile();
@@ -148,10 +150,10 @@ export function SessionSidebar({
     async (sessionId: string) => {
       await handleSessionArchived(sessionId);
       if (currentSessionId === sessionId) {
-        router.push("/");
+        router.push(scopedHref("/"));
       }
     },
-    [currentSessionId, handleSessionArchived, router]
+    [currentSessionId, handleSessionArchived, router, scopedHref]
   );
 
   // Environment provenance for the cards, resolved once for the whole list.
@@ -326,7 +328,7 @@ export function SessionSidebar({
         ).map(({ href, label, icon: Icon }) => (
           <Link
             key={href}
-            href={href === "/sessions" ? buildSessionsHref(teamQuery) : href}
+            href={scopedHref(href === "/sessions" ? buildSessionsHref(teamQuery) : href)}
             onClick={handleNavigationSelect}
             aria-current={
               pathname === href || pathname?.startsWith(`${href}/`) ? "page" : undefined
@@ -369,6 +371,12 @@ export function SessionSidebar({
           </ToggleGroupItem>
         </ToggleGroup>
       </div>
+
+      {repoFullName !== null && (
+        <div className="px-4 pb-2 text-xs text-muted-foreground break-all">
+          {repoFullName || "Invalid repository home"}
+        </div>
+      )}
 
       {/* Session List */}
       <div className="flex-1 overflow-y-auto">
@@ -419,7 +427,7 @@ export function SessionSidebar({
 
             {hasPermission("sessions.read") && (
               <Link
-                href={buildSessionsHref({ ...teamQuery, lifecycle: "archived" })}
+                href={scopedHref(buildSessionsHref({ ...teamQuery, lifecycle: "archived" }))}
                 onClick={handleNavigationSelect}
                 className="mt-2 flex items-center gap-1 px-4 py-2 text-xs font-medium uppercase tracking-wider text-secondary-foreground transition hover:bg-muted hover:text-foreground"
               >

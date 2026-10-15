@@ -35,7 +35,7 @@ const SESSION_INBOX_API_PATH = "/api/sessions/inbox";
 
 export type SessionInboxFilters = Pick<
   SessionListQuery,
-  "teamIds" | "scope" | "ownerFilter" | "visibility"
+  "teamIds" | "scope" | "ownerFilter" | "visibility" | "repoOwner" | "repoName"
 >;
 
 interface SessionInboxQuery extends SessionInboxFilters {
@@ -64,6 +64,10 @@ export function buildSessionInboxSnapshotKey(
 }
 
 function appendInboxFilters(params: URLSearchParams, filters: SessionInboxFilters) {
+  if (filters.repoOwner && filters.repoName) {
+    params.set("repoOwner", filters.repoOwner);
+    params.set("repoName", filters.repoName);
+  }
   for (const teamId of filters.teamIds ?? []) params.append("teamIds[]", teamId);
   if (filters.scope) params.set("scope", filters.scope);
   if (filters.ownerFilter) params.set("ownerFilter", filters.ownerFilter);

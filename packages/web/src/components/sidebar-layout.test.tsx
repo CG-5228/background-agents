@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /// <reference types="@testing-library/jest-dom" />
 
+import { RepositoryHomeProvider } from "@/hooks/use-repository-home";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +12,7 @@ import type * as SWR from "swr";
 expect.extend(matchers);
 
 const mocks = vi.hoisted(() => ({
+  homeQuery: "",
   isMobile: false,
   canCreateSession: true,
   activeTeamId: null as string | null,
@@ -51,6 +53,7 @@ vi.mock("@/hooks/use-active-team", () => ({
 vi.mock("next/navigation", () => ({
   useRouter: vi.fn(),
   usePathname: () => "/",
+  useSearchParams: () => new URLSearchParams(mocks.homeQuery),
 }));
 
 vi.mock("@/hooks/use-media-query", () => ({
@@ -71,6 +74,7 @@ vi.mock("@/hooks/use-current-user-authorization", () => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mocks.homeQuery = "";
   mocks.isMobile = false;
   mocks.canCreateSession = true;
   mocks.sidebar.isOpen = true;
@@ -81,6 +85,26 @@ afterEach(() => {
 });
 
 describe("command-menu recent session scope", () => {
+  it("keeps repository scope in quick search and new-session actions", () => {
+    mocks.homeQuery = "homeRepo=acme%2Fwebsite";
+    const push = vi.fn();
+    vi.mocked(useRouter).mockReturnValue({ push } as never);
+    render(
+      <RepositoryHomeProvider>
+        <SidebarLayout>
+          <CollapsedSidebarControls />
+        </SidebarLayout>
+      </RepositoryHomeProvider>
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: /Quick search recent sessions/ })[0]);
+    expect(mocks.useSWR).toHaveBeenCalledWith(
+      "/api/sessions?limit=100&offset=0&excludeStatus=archived&repoOwner=acme&repoName=website&scope=workspace",
+      expect.any(Function)
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: /New session/ })[0]);
+    expect(push).toHaveBeenCalledWith("/?homeRepo=acme%2Fwebsite");
+  });
+
   it.each([
     { label: "Workspace", activeTeamId: null, scope: "workspace", suffix: "scope=workspace" },
     {

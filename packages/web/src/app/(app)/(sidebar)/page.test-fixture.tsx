@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => {
     requireTeamOnCreate: false,
   };
   return {
+    homeQuery: "",
     userId: "user-1",
     routerPush: vi.fn(),
     toastError: vi.fn(),
@@ -148,6 +149,7 @@ vi.mock("@/hooks/use-active-team", () => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.routerPush }),
+  useSearchParams: () => new URLSearchParams(mocks.homeQuery),
 }));
 vi.mock("sonner", () => ({ toast: { error: mocks.toastError } }));
 
@@ -265,6 +267,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  mocks.homeQuery = "";
   mocks.reposValue = [repo];
   mocks.loadingReposValue = false;
   mocks.environmentsLoadingValue = false;

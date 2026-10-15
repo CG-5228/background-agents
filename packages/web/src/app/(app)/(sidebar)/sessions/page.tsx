@@ -1,5 +1,7 @@
 "use client";
 
+import { useRepositoryHome } from "@/hooks/use-repository-home";
+
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -37,6 +39,7 @@ export default function SessionsPage() {
 }
 
 function SessionsContent() {
+  const { scopedHref } = useRepositoryHome();
   const { isOpen } = useSidebarContext();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -124,9 +127,9 @@ function SessionsContent() {
       setControlsQuery(next);
       if ("q" in patch) pendingSearch.current = null;
       const href = buildSessionsHref(next);
-      if (href !== previousHref) router.replace(href, { scroll: false });
+      if (href !== previousHref) router.replace(scopedHref(href), { scroll: false });
     },
-    [router]
+    [router, scopedHref]
   );
   // An explicit shared link wins on entry; a later switcher action changes
   // only its team predicate, including search text still waiting to debounce.
@@ -175,8 +178,8 @@ function SessionsContent() {
     const next = { ...DEFAULT_SESSION_DISCOVERY_QUERY, ...teamContext };
     latestQuery.current = next;
     setControlsQuery(next);
-    router.replace(buildSessionsHref(next), { scroll: false });
-  }, [router, teamContext]);
+    router.replace(scopedHref(buildSessionsHref(next)), { scroll: false });
+  }, [router, teamContext, scopedHref]);
   const resetSearch = useCallback(() => {
     setSearchText("");
     updateQuery({ q: "" });
@@ -196,10 +199,10 @@ function SessionsContent() {
       }
       const next = { ...latestQuery.current, q: pending };
       latestQuery.current = next;
-      router.replace(buildSessionsHref(next), { scroll: false });
+      router.replace(scopedHref(buildSessionsHref(next)), { scroll: false });
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timeoutId);
-  }, [router, searchText]);
+  }, [router, searchText, scopedHref]);
 
   const canQuery = canReadSessions && parsed.success && !teamLoading && !teamError;
   const { sessions, loading, loadingMore, error, hasMore, loadMore, retry } = useSessionDiscovery(
@@ -252,7 +255,7 @@ function SessionsContent() {
             </div>
             {canCreateSession && (
               <Button size="sm" asChild>
-                <Link href="/" className="flex items-center gap-1.5">
+                <Link href={scopedHref("/")} className="flex items-center gap-1.5">
                   <PlusIcon className="w-4 h-4" />
                   New session
                 </Link>
@@ -313,7 +316,7 @@ function SessionsContent() {
                 <p className="mb-4 text-xs text-muted-foreground">
                   Showing archived sessions.{" "}
                   <Link
-                    href={MANAGE_ARCHIVED_SESSIONS_HREF}
+                    href={scopedHref(MANAGE_ARCHIVED_SESSIONS_HREF)}
                     className="text-accent hover:underline"
                   >
                     Manage archived sessions
@@ -386,7 +389,7 @@ function SessionsContent() {
                     </p>
                     {canCreateSession && (
                       <Button size="sm" className="mt-3" asChild>
-                        <Link href="/">New session</Link>
+                        <Link href={scopedHref("/")}>New session</Link>
                       </Button>
                     )}
                   </div>

@@ -15,7 +15,14 @@ import type { SqlDatabase, SqlStatement } from "./sql-database";
 /** Viewer, filtering, and pagination inputs for an inbox query. */
 export interface ListSessionInboxOptions extends Pick<
   SessionListFilters,
-  "createdByUserIds" | "teamIds" | "ownerFilter" | "visibility" | "scope" | "readScope" | "mode"
+  | "createdByUserIds"
+  | "teamIds"
+  | "ownerFilter"
+  | "visibility"
+  | "scope"
+  | "readScope"
+  | "mode"
+  | "repository"
 > {
   category: SessionInboxCategory;
   excludeAutomatedSessions?: boolean;

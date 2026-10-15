@@ -18,6 +18,7 @@ import { SidebarIcon } from "@/components/ui/icons";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { useMobileSidebarPull } from "@/hooks/use-mobile-sidebar-pull";
 import { useCurrentUserAuthorization } from "@/hooks/use-current-user-authorization";
+import { useRepositoryHome } from "@/hooks/use-repository-home";
 import { useActiveTeam } from "@/hooks/use-active-team";
 import { serializeSessionListQuery } from "@open-inspect/shared/session-list-query";
 
@@ -105,12 +106,22 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
   });
 
   const { activeTeamId, scope, loading: teamLoading, error: teamError } = useActiveTeam();
-  const teamContext = { teamIds: activeTeamId ? [activeTeamId] : undefined, scope };
-  const teamParams = serializeSessionListQuery(teamContext).toString();
+  const { repoFullName, repository, scopedHref } = useRepositoryHome();
+  const teamContext = {
+    teamIds: activeTeamId ? [activeTeamId] : undefined,
+    scope,
+    ...(repository ? { repository } : {}),
+  };
+  const teamParams = serializeSessionListQuery({ ...teamContext, ...repository }).toString();
   const recentSessionsKey = `${COMMAND_MENU_SESSIONS_KEY}${teamParams ? `&${teamParams}` : ""}`;
 
   const { data: sessionsResponse } = useSWR<SessionListResponse>(
-    isCommandMenuOpen && !teamLoading && !teamError ? recentSessionsKey : null,
+    isCommandMenuOpen &&
+      (repoFullName === null || repository !== null) &&
+      !teamLoading &&
+      !teamError
+      ? recentSessionsKey
+      : null,
     fetchSessionListPage
   );
 
@@ -120,17 +131,17 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
     if (isMobile) {
       sidebar.close();
     }
-    router.push("/");
-  }, [canCreateSession, isMobile, router, sidebar]);
+    router.push(scopedHref("/"));
+  }, [canCreateSession, isMobile, router, sidebar, scopedHref]);
 
   const handleNavigate = useCallback(
     (href: string) => {
       if (isMobile) {
         sidebar.close();
       }
-      router.push(href);
+      router.push(scopedHref(href));
     },
-    [isMobile, router, sidebar]
+    [isMobile, router, sidebar, scopedHref]
   );
 
   const handleOpenCommandMenu = useCallback(() => {

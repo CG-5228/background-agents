@@ -111,6 +111,7 @@ export interface SessionTargetPickerProps {
   loadingRepos: boolean;
   repositoryGrantError: string | null;
   selectionError: string | null;
+  targetLocked?: boolean;
 }
 
 /** Launch-facing selection state for the page: warming identity and request construction. */
@@ -157,9 +158,11 @@ function targetIsAvailable(
 export function useSessionTargetPicker({
   teamId = null,
   defaultEnvironmentId = null,
+  lockedRepoFullName = null,
 }: {
   teamId?: string | null;
   defaultEnvironmentId?: string | null;
+  lockedRepoFullName?: string | null;
 } = {}): SessionTargetSelection {
   const {
     repos,
@@ -189,7 +192,7 @@ export function useSessionTargetPicker({
         : null;
   const inSelectionContext =
     selectionContext.teamId === teamId &&
-    selectionContext.defaultEnvironmentId === defaultEnvironmentId;
+    (lockedRepoFullName !== null || selectionContext.defaultEnvironmentId === defaultEnvironmentId);
   // A failed catalog neither confirms nor replaces this context's target; a draft left from
   // another team or default still falls back to the new context's catalogs.
   const catalogErrorHoldsTarget = !!targetCatalogError && inSelectionContext;
@@ -200,12 +203,25 @@ export function useSessionTargetPicker({
     !loadingEnvironments &&
     !targetCatalogError &&
     !targetIsAvailable(draftTarget, repos, environments);
+  const lockedRepo =
+    lockedRepoFullName === null
+      ? undefined
+      : repos.find((repo) => repo.fullName.toLowerCase() === lockedRepoFullName.toLowerCase());
   const selectionError =
-    selectionInvalidated || explicitTargetUnavailable
-      ? "Your selected target is no longer available. Choose a target again."
-      : null;
+    lockedRepoFullName !== null && !loadingRepos && (!lockedRepo || reposError)
+      ? "This home repository is unavailable. Check your repository access or team selection."
+      : selectionInvalidated || explicitTargetUnavailable
+        ? "Your selected target is no longer available. Choose a target again."
+        : null;
   // Never launch a previous team's target before its new catalogs reconcile.
+  const lockedTargetReady =
+    lockedRepoFullName === null ||
+    (!!lockedRepo &&
+      !reposError &&
+      draftTarget?.kind === "repo" &&
+      draftTarget.repoFullName === lockedRepo.fullName);
   const sessionTarget =
+    lockedTargetReady &&
     !loadingRepos &&
     !loadingEnvironments &&
     selectionContext.teamId === teamId &&
@@ -216,7 +232,11 @@ export function useSessionTargetPicker({
       ? draftTarget
       : null;
   const pickerTarget =
-    hasExplicitSelection || catalogErrorHoldsTarget ? draftTarget : sessionTarget;
+    lockedRepoFullName !== null
+      ? sessionTarget
+      : hasExplicitSelection || catalogErrorHoldsTarget
+        ? draftTarget
+        : sessionTarget;
 
   const selectedRepository =
     sessionTarget?.kind === "repo" ? parseRepositoryFullName(sessionTarget.repoFullName) : null;
@@ -244,6 +264,21 @@ export function useSessionTargetPicker({
   // Team defaults win over stored preferences, but never over a draft's explicit choice.
   useEffect(() => {
     if (loadingRepos || loadingEnvironments) return;
+
+    if (lockedRepoFullName !== null) {
+      if (
+        lockedRepo &&
+        !reposError &&
+        (!lockedTargetReady || selectionContext.teamId !== teamId || selectionInvalidated)
+      ) {
+        setSessionTarget({ kind: "repo", repoFullName: lockedRepo.fullName });
+        updateSelectedBranch(lockedRepo.defaultBranch);
+        setSelectionContext({ teamId, defaultEnvironmentId });
+        setSelectionInvalidated(false);
+        setHasExplicitSelection(false);
+      }
+      return;
+    }
 
     if (hasExplicitSelection) {
       // Only a successful catalog can invalidate a choice; restoration never confirms it.
@@ -289,6 +324,10 @@ export function useSessionTargetPicker({
     setSessionTarget(nextTarget);
     setSelectionContext({ teamId, defaultEnvironmentId });
   }, [
+    lockedRepo,
+    lockedRepoFullName,
+    lockedTargetReady,
+    reposError,
     catalogErrorHoldsTarget,
     defaultEnvironmentId,
     draftTarget,
@@ -308,12 +347,14 @@ export function useSessionTargetPicker({
   // Persist launchable, restorable selections: repos and environments. Ad-hoc
   // lists and "no repository" keep whatever was stored before them.
   useEffect(() => {
+    if (lockedRepoFullName !== null) return;
     if (sessionTarget?.kind !== "repo" && sessionTarget?.kind !== "environment") return;
     localStorage.setItem(LAST_SELECTED_TARGET_STORAGE_KEY, getTargetSelectValue(sessionTarget));
-  }, [sessionTarget]);
+  }, [sessionTarget, lockedRepoFullName]);
 
   const onTargetSelectValueChange = useCallback(
     (value: string) => {
+      if (lockedRepoFullName !== null) return;
       setHasExplicitSelection(true);
       setSelectionInvalidated(false);
       const nextTarget = parseTargetSelectValue(value, draftTarget);
@@ -326,17 +367,18 @@ export function useSessionTargetPicker({
       const repo = repos.find((r) => r.fullName === nextTarget.repoFullName);
       if (repo) updateSelectedBranch(repo.defaultBranch);
     },
-    [defaultEnvironmentId, draftTarget, repos, teamId]
+    [defaultEnvironmentId, draftTarget, repos, teamId, lockedRepoFullName]
   );
 
   const onMultiSelectionChange = useCallback(
     (repoFullNames: string[]) => {
+      if (lockedRepoFullName !== null) return;
       setHasExplicitSelection(true);
       setSelectionInvalidated(false);
       setSessionTarget({ kind: "repos", repoFullNames });
       setSelectionContext({ teamId, defaultEnvironmentId });
     },
-    [defaultEnvironmentId, teamId]
+    [defaultEnvironmentId, teamId, lockedRepoFullName]
   );
 
   const setSelectedBranch = useCallback((branch: string) => {
@@ -423,6 +465,7 @@ export function useSessionTargetPicker({
     configKey: getTargetConfigKey(sessionTarget),
     buildRequestFields,
     pickerProps: {
+      targetLocked: lockedRepoFullName !== null,
       sessionTarget: pickerTarget,
       targetSelectValue: getTargetSelectValue(pickerTarget),
       targetOptions,

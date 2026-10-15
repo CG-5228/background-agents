@@ -841,3 +841,79 @@ describe("describeRepository", () => {
     );
   });
 });
+
+describe("repository home target", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    mocks.repos.mockReturnValue({
+      repos: [
+        repo(),
+        repo({
+          id: 2,
+          fullName: "group/subgroup/site",
+          owner: "group/subgroup",
+          name: "site",
+          defaultBranch: "production",
+        }),
+      ],
+      loading: false,
+    });
+    mocks.environments.mockReturnValue({ environments: [environment()], loading: false });
+  });
+  afterEach(cleanup);
+
+  it("locks launches to the URL repository ahead of stored and team defaults", () => {
+    localStorage.setItem("open-inspect-last-selected-repo", "acme/web");
+    const { result } = renderHook(() =>
+      useSessionTargetPicker({
+        defaultEnvironmentId: "env-1",
+        lockedRepoFullName: "group/subgroup/site",
+      })
+    );
+    expect(result.current.buildRequestFields()).toEqual({
+      repoOwner: "group/subgroup",
+      repoName: "site",
+      branch: "production",
+    });
+    act(() => result.current.pickerProps.onTargetSelectValueChange("acme/web"));
+    act(() => result.current.pickerProps.onMultiSelectionChange(["acme/web"]));
+    expect(result.current.buildRequestFields()).toEqual({
+      repoOwner: "group/subgroup",
+      repoName: "site",
+      branch: "production",
+    });
+    expect(localStorage.getItem("open-inspect-last-selected-repo")).toBe("acme/web");
+  });
+
+  it("reconciles scope switches without launching the old repository and keeps branch selection", () => {
+    const { result, rerender } = renderHook(
+      ({ lockedRepoFullName, defaultEnvironmentId }) =>
+        useSessionTargetPicker({ lockedRepoFullName, defaultEnvironmentId }),
+      { initialProps: { lockedRepoFullName: "acme/web", defaultEnvironmentId: "env-1" } }
+    );
+    act(() => result.current.pickerProps.setSelectedBranch("feature"));
+    expect(result.current.buildRequestFields()).toMatchObject({
+      repoName: "web",
+      branch: "feature",
+    });
+    rerender({ lockedRepoFullName: "group/subgroup/site", defaultEnvironmentId: "env-1" });
+    expect(result.current.buildRequestFields()).toMatchObject({
+      repoName: "site",
+      branch: "production",
+    });
+    rerender({ lockedRepoFullName: "group/subgroup/site", defaultEnvironmentId: "env-2" });
+    expect(result.current.buildRequestFields()).toMatchObject({
+      repoName: "site",
+      branch: "production",
+    });
+  });
+
+  it("never falls back to another target when the home repository is unavailable", () => {
+    const { result } = renderHook(() =>
+      useSessionTargetPicker({ lockedRepoFullName: "acme/missing" })
+    );
+    expect(result.current.buildRequestFields()).toBeNull();
+    expect(result.current.isLaunchable).toBe(false);
+    expect(result.current.pickerProps.selectionError).toMatch(/unavailable/i);
+  });
+});
