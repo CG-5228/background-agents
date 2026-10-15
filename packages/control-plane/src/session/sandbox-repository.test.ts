@@ -9,7 +9,7 @@ import { initSchema } from "./schema";
 const TEST_ENCRYPTION_KEY = generateEncryptionKey();
 const log = createLogger("sandbox-repository-test", {}, "error");
 
-describe("SandboxRepository completeProviderResume (SQLite)", () => {
+describe("SandboxRepository commitProviderAccess (SQLite)", () => {
   const generation = { sandboxId: "sb-1", createdAt: 2000 };
   const access = {
     providerObjectId: "provider-2",
@@ -48,6 +48,15 @@ describe("SandboxRepository completeProviderResume (SQLite)", () => {
     ["stopped generation", "status = 'stopped'", "pending", false],
     ["stale generation", "status = 'stale'", "pending", false],
     ["failed generation", "status = 'failed'", "pending", false],
+    ["late access for an unfenced failed boot", "status = 'failed'", undefined, true, true],
+    [
+      "late access for a fenced failed boot",
+      "status = 'failed', fenced = 1",
+      undefined,
+      false,
+      true,
+    ],
+    ["late access for a stopped boot", "status = 'stopped'", undefined, false, true],
     ["fenced generation", "fenced = 1", "pending", false],
     [
       "changed expected provider reference",
@@ -64,7 +73,13 @@ describe("SandboxRepository completeProviderResume (SQLite)", () => {
     ],
   ] as const)(
     "rechecks guarded SQL after credential encryption: %s",
-    async (_case, change, expectedProviderObjectId, shouldCommit) => {
+    async (
+      _case,
+      change,
+      expectedProviderObjectId,
+      shouldCommit,
+      allowFailedSelfHeal: boolean = false
+    ) => {
       const { db, repository, set } = createSqliteRepository();
       const [successorCodePassword, successorVncPassword, successorTtydToken] = await Promise.all([
         encryptToken("successor-code-secret", TEST_ENCRYPTION_KEY),
@@ -83,10 +98,11 @@ describe("SandboxRepository completeProviderResume (SQLite)", () => {
         return encrypted;
       });
       try {
-        const completion = repository.completeProviderResume(
+        const completion = repository.commitProviderAccess(
           generation,
           access,
-          expectedProviderObjectId
+          expectedProviderObjectId,
+          allowFailedSelfHeal
         );
         await encrypting;
         set(change);
@@ -137,4 +153,18 @@ describe("SandboxRepository completeProviderResume (SQLite)", () => {
       }
     }
   );
+  it("retains the accepted cleanup handle when a provider omits it from access", async () => {
+    const { db, repository } = createSqliteRepository();
+    try {
+      await expect(
+        repository.commitProviderAccess(generation, { ...access, providerObjectId: null })
+      ).resolves.toBe(true);
+      expect(repository.getSandbox()?.modal_object_id).toBe("pending");
+      await expect(repository.getSandboxAccessSecret("codeServer")).resolves.toBe(
+        access.codeServer.password
+      );
+    } finally {
+      db.close();
+    }
+  });
 });

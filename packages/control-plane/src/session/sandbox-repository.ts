@@ -77,9 +77,9 @@ export interface ResumeSandboxData {
   createdAt: number;
 }
 
-/** Provider access discovered while resuming an existing sandbox. */
-export interface ProviderResumeAccessData {
-  providerObjectId: string;
+/** Provider access discovered during create, restore, resume or reconciliation. */
+export interface ProviderAccessData {
+  providerObjectId: string | null;
   codeServer: { url: string; password: string } | null;
   vnc: { url: string; password: string } | null;
   ttyd: { url: string | null; token: string } | null;
@@ -376,14 +376,16 @@ export class SandboxRepository {
   }
 
   /**
-   * Commit all provider access returned by a resume as one generation-scoped
+   * Commit all provider access returned by startup as one generation-scoped
    * write. `ready` is allowed because the bridge can complete startup before
-   * the provider's resume request returns.
+   * the provider's request returns. An unfenced failed boot may self-heal only
+   * for providers without explicit stop.
    */
-  async completeProviderResume(
+  async commitProviderAccess(
     generation: { sandboxId: string | null; createdAt: number },
-    access: ProviderResumeAccessData,
-    expectedProviderObjectId?: string
+    access: ProviderAccessData,
+    expectedProviderObjectId?: string,
+    allowFailedSelfHeal = false
   ): Promise<boolean> {
     const [codeServerPassword, vncPassword, ttydToken] = await Promise.all([
       access.codeServer ? this.encrypt(access.codeServer.password) : null,
@@ -392,7 +394,7 @@ export class SandboxRepository {
     ]);
     const result = this.sql.exec(
       `UPDATE sandbox SET
-         modal_object_id = ?,
+         modal_object_id = COALESCE(?, modal_object_id),
          code_server_url = ?,
          code_server_password = ?,
          vnc_url = ?,
@@ -402,7 +404,8 @@ export class SandboxRepository {
          tunnel_urls = ?
        WHERE id = (SELECT id FROM sandbox LIMIT 1)
          AND modal_sandbox_id IS ? AND created_at = ?
-          AND (status IN ('connecting', 'ready') OR (? IS NOT NULL AND status = 'spawning'))
+          AND (status IN ('connecting', 'ready') OR (? IS NOT NULL AND status = 'spawning')
+               OR (? = 1 AND status = 'failed'))
           AND fenced = 0 AND (? IS NULL OR modal_object_id = ?)`,
       access.providerObjectId,
       access.codeServer?.url ?? null,
@@ -415,6 +418,7 @@ export class SandboxRepository {
       generation.sandboxId,
       generation.createdAt,
       expectedProviderObjectId ?? null,
+      allowFailedSelfHeal ? 1 : 0,
       expectedProviderObjectId ?? null,
       expectedProviderObjectId ?? null
     );
