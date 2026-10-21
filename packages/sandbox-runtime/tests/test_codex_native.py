@@ -133,7 +133,10 @@ def remote_mcp(request):
 
 @pytest.fixture
 def responses():
+    # A scripted entry {"subagent": item} answers the next sub-agent request;
+    # every other entry answers the next parent request, in order.
     received, scripted_items = [], []
+    lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -162,10 +165,18 @@ def responses():
             if not self.path.endswith("/responses"):
                 self.send_error(404)
                 return
-            received.append({"body": body, "auth": self.headers.get("Authorization")})
-            if scripted_items and "http_status" in scripted_items[0]:
+            subagent = bool(self.headers.get("x-openai-subagent"))
+            with lock:
+                received.append(
+                    {"body": body, "auth": self.headers.get("Authorization"), "subagent": subagent}
+                )
+                index = len(received)
+                entry = next((e for e in scripted_items if ("subagent" in e) == subagent), None)
+                if entry is not None:
+                    scripted_items.remove(entry)
+            if entry is not None and "http_status" in entry:
                 body = b'{"error":{"message":"unauthorized"}}'
-                self.send_response(scripted_items.pop(0)["http_status"])
+                self.send_response(entry["http_status"])
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -174,7 +185,6 @@ def responses():
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            index = len(received)
             events = [
                 {"type": "response.created", "response": {"id": f"r{index}"}},
                 {
@@ -200,8 +210,8 @@ def responses():
                     },
                 },
             ]
-            if scripted_items:
-                events[1]["item"] = scripted_items.pop(0)
+            if entry is not None:
+                events[1]["item"] = entry.get("subagent", entry)
             for event in events:
                 self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
             self.wfile.flush()
@@ -498,6 +508,74 @@ async def test_native_platform_tool_callback_survives_restart(tmp_path, response
             await harness.close()
         assert "No child sessions found." in json.dumps(requests[-1]["body"])
     assert len(requests) == 4
+
+
+async def test_native_subagent_is_a_task_with_nested_tools_and_usage(
+    tmp_path, responses, native_factory
+):
+    import httpx
+
+    from sandbox_runtime.harness.tools import ToolServerConfig
+
+    _, requests, scripted = responses
+    tools = ToolServerConfig(
+        "http://fixture.invalid", "session", "sandbox-auth", tmp_path / "repos.json", False, False
+    )
+
+    def call(call_id, namespace, name, arguments):
+        return {
+            "type": "function_call",
+            "call_id": call_id,
+            "namespace": namespace,
+            "name": name,
+            "arguments": json.dumps(arguments),
+        }
+
+    scripted.extend(
+        [
+            call("spawn", "collaboration", "spawn_agent", {"task_name": "check", "message": "Go."}),
+            # The sub-agent calls an OpenInspect tool from its own thread, then answers.
+            {"subagent": call("child-tool", "oi", "get-child-status", {})},
+            call("wait", "collaboration", "wait_agent", {"timeout_ms": 30000}),
+        ]
+    )
+    harness = CodexHarness(
+        config=CodexHarnessConfig(tmp_path, tmp_path / "state", "gpt-6.1-sol", False, tools=tools),
+        log=MagicMock(),
+        limits=PromptLimits(1, 60, 30),
+        client_factory=native_factory,
+        environ={"OPENAI_API_KEY": "synthetic"},
+    )
+    harness._tool_client.request = AsyncMock(
+        return_value=httpx.Response(200, json={"children": []})
+    )
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    try:
+        result = await harness.run_prompt(HarnessPrompt("m", "Use a sub-agent."), emit)
+    finally:
+        await harness.close()
+    assert result.success, result
+    harness._tool_client.request.assert_awaited_once_with("GET", "/children")
+    assert sum(request["subagent"] for request in requests) == 2
+
+    [task] = [e for e in events if e.get("tool") == "task" and e["status"] == "completed"]
+    assert task["args"] == {"description": "check", "task_id": "/root/check"}
+    child_answer = next(r for r in reversed(requests) if r["subagent"])
+    assert task["output"] == f"answer {requests.index(child_answer) + 1}"
+    nested = [e for e in events if e.get("taskCallId") == task["callId"]]
+    assert all(e["isSubtask"] and e["childSessionId"] == task["childSessionId"] for e in nested)
+    [tool] = [e for e in nested if e["type"] == "tool_call" and e["status"] == "completed"]
+    assert tool["tool"] == "get-child-status"
+    assert "No child sessions found." in tool["output"]
+    # Two sub-agent model calls of 120 tokens each, reported apart from the parent's.
+    assert [e for e in nested if e["type"] == "step_finish"][-1]["tokens"]["total"] == 240
+    parent_step = events[-1]
+    assert parent_step["type"] == "step_finish" and "isSubtask" not in parent_step
+    assert parent_step["tokens"]["total"] == 360
 
 
 async def test_native_image_attachment_is_consumed_and_staging_removed(
