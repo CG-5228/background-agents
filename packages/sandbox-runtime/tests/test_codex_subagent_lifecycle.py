@@ -187,3 +187,50 @@ async def test_abnormal_exit_distrusts_subagent_usage(tmp_path):
         await harness.run_prompt(HarnessPrompt("m", "delegate"), failing_emit)
     assert harness._subagent_totals == {}
     assert harness._subagents is None
+
+
+def interacted(agent=CHILD):
+    frame = spawned(agent)
+    frame["params"]["item"] = {**frame["params"]["item"], "kind": "interacted"}
+    return frame
+
+
+async def test_parent_completing_before_a_messaged_subagent_starts_still_waits(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("sandbox_runtime.harness.codex.SUBAGENT_INTERACTION_GRACE_SECONDS", 5)
+    harness, _, queue, _ = build(tmp_path)
+    events = []
+    for frame in (interacted(), completed(PARENT, TURN)):
+        queue.put_nowait(frame)
+    prompt = asyncio.create_task(run(harness, events))
+    await asyncio.sleep(0.05)
+    assert not prompt.done()
+    for frame in (started(CHILD, "child-turn"), completed(CHILD, "child-turn")):
+        queue.put_nowait(frame)
+    assert (await asyncio.wait_for(prompt, 5)).success
+    assert [e for e in events if e.get("tool") == "task"][-1]["status"] == "completed"
+
+
+async def test_message_that_starts_no_turn_settles_after_the_grace_period(tmp_path, monkeypatch):
+    monkeypatch.setattr("sandbox_runtime.harness.codex.SUBAGENT_INTERACTION_GRACE_SECONDS", 0.05)
+    harness, _, queue, _ = build(tmp_path)
+    events = []
+    for frame in (interacted(), completed(PARENT, TURN)):
+        queue.put_nowait(frame)
+    assert (await asyncio.wait_for(run(harness, events), 5)).success
+    assert not [e for e in events if e.get("tool") == "task"]
+
+
+async def test_subagent_finished_before_its_announcement_settles(tmp_path):
+    harness, _, queue, _ = build(tmp_path)
+    events = []
+    for frame in (
+        started(CHILD, "child-turn"),
+        completed(CHILD, "child-turn"),
+        spawned(),
+        completed(PARENT, TURN),
+    ):
+        queue.put_nowait(frame)
+    assert (await asyncio.wait_for(run(harness, events), 5)).success
+    assert [e for e in events if e.get("tool") == "task"][-1]["status"] == "completed"

@@ -26,6 +26,9 @@ from .events import (
 )
 
 SUBAGENT_INTERRUPTED_MESSAGE = "Sub-agent interrupted"
+# Activity frames of descendants not yet announced, kept for replay. Turn
+# lifecycle frames are always kept so a late announcement can settle.
+MAX_UNANNOUNCED_FRAMES = 2000
 
 
 def _zero_usage() -> dict[str, int]:
@@ -72,6 +75,11 @@ class CodexSubagents:
         self._subagents: dict[str, _Subagent] = {}
         # Running turns rooted at this prompt's turn, by thread.
         self._turns: dict[str, str] = {}
+        # Frames of rooted turns whose sub-agent is not announced yet, by thread.
+        self._unannounced: dict[str, list[dict[str, Any]]] = {}
+        self._unannounced_frames = 0
+        # Sub-agents messaged while idle: a message may or may not start a turn.
+        self._interactions: set[str] = set()
         self._refused: set[str] = set()
         self._interrupts: list[tuple[str, str]] = []
         self._stopping = False
@@ -79,7 +87,20 @@ class CodexSubagents:
     @property
     def busy(self) -> bool:
         """Whether descendant work rooted at this prompt is announced or running."""
+        return self._running or bool(self._interactions)
+
+    @property
+    def awaiting_interactions(self) -> bool:
+        """Whether only messages to idle sub-agents, which may start no turn, remain."""
+        return bool(self._interactions) and not self._running
+
+    @property
+    def _running(self) -> bool:
         return bool(self._turns) or any(s.pending for s in self._subagents.values())
+
+    def expire_interactions(self) -> None:
+        """Treat outstanding messages as having started no turn."""
+        self._interactions.clear()
 
     def owns(self, thread_id: Any, turn_id: Any) -> bool:
         """Whether a host tool call comes from a projected sub-agent's running turn."""
@@ -111,6 +132,8 @@ class CodexSubagents:
         if thread_id == self.thread_id:
             return []
         turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        if thread_id not in self._subagents and thread_id not in self._refused:
+            return self._hold(thread_id, method, turn, frame)
         if method == "turn/started":
             return self._turn_started(thread_id, turn)
         if method == "turn/completed":
@@ -142,13 +165,14 @@ class CodexSubagents:
             if thread_id in self._subagents and kind == "started":
                 self._refuse(agent_thread_id)
             return []
+        if turn_id != self.turn_id:
+            return []
+        if kind == "interacted" and agent_thread_id not in self._turns:
+            # Settlement waits for the turn a message may start; see busy.
+            self._interactions.add(agent_thread_id)
         # Completion is read from the sub-agent's own turn; a re-tasked
         # sub-agent of an earlier prompt is announced as ``interacted``.
-        if (
-            turn_id != self.turn_id
-            or kind not in {"started", "interacted"}
-            or agent_thread_id in self._subagents
-        ):
+        if kind not in {"started", "interacted"} or agent_thread_id in self._subagents:
             return []
         path = item.get("agentPath")
         path = path if isinstance(path, str) and path.strip("/") else agent_thread_id
@@ -163,40 +187,69 @@ class CodexSubagents:
             total=_zero_usage() if kind == "started" else dict(known or _zero_usage()),
             total_known=kind == "started" or known is not None,
             # Spawning always starts the sub-agent's first turn.
-            pending=kind == "started" and agent_thread_id not in self._turns,
+            pending=kind == "started",
         )
         self._subagents[agent_thread_id] = subagent
         if kind == "started":
             self._totals[agent_thread_id] = dict(subagent.total)
-        if agent_thread_id in self._turns:
-            # The sub-agent's turn was reported before its announcement.
-            return self._begin(subagent, self._turns[agent_thread_id])
         # A message to an idle sub-agent need not start a turn: its task row
         # appears only when it does.
-        return [self._task(subagent)] if subagent.pending else []
+        events = [self._task(subagent)] if subagent.pending else []
+        # Replay what the sub-agent did before it was announced, which can
+        # include starting and finishing its turn.
+        frames = self._unannounced.pop(agent_thread_id, [])
+        self._unannounced_frames -= len(frames)
+        self._turns.pop(agent_thread_id, None)
+        for frame in frames:
+            events.extend(self.accept(frame))
+        return events
+
+    def _hold(
+        self, thread_id: str, method: Any, turn: dict[str, Any], frame: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Track and keep a not-yet-announced descendant's frames for replay."""
+        if method == "turn/started":
+            turn_id = turn.get("id")
+            if (
+                not isinstance(turn_id, str)
+                or not turn_id
+                or turn.get("rootTurnId") != self.turn_id
+            ):
+                return []
+            # Running work even before its announcement.
+            self._turns[thread_id] = turn_id
+            if self._stopping:
+                self._interrupts.append((thread_id, turn_id))
+            self._unannounced.setdefault(thread_id, [])
+        elif thread_id not in self._unannounced:
+            return []
+        elif method == "turn/completed":
+            if self._turns.get(thread_id) == turn.get("id"):
+                del self._turns[thread_id]
+        elif self._unannounced_frames >= MAX_UNANNOUNCED_FRAMES:
+            return []
+        self._unannounced[thread_id].append(frame)
+        self._unannounced_frames += 1
+        return []
 
     def _refuse(self, thread_id: str) -> None:
         if thread_id in self._refused:
             return
         self._refused.add(thread_id)
+        self._unannounced_frames -= len(self._unannounced.pop(thread_id, []))
         if thread_id in self._turns:
             self._interrupts.append((thread_id, self._turns[thread_id]))
 
     def _turn_started(self, thread_id: str, turn: dict[str, Any]) -> list[dict[str, Any]]:
         turn_id = turn.get("id")
-        if not isinstance(turn_id, str) or not turn_id:
-            return []
-        subagent = self._subagents.get(thread_id)
-        if (
-            subagent is None
-            and thread_id not in self._refused
-            and turn.get("rootTurnId") != self.turn_id
-        ):
+        # Only turns rooted at this prompt are its work, even on a known thread.
+        if not isinstance(turn_id, str) or not turn_id or turn.get("rootTurnId") != self.turn_id:
             return []
         self._turns[thread_id] = turn_id
+        self._interactions.discard(thread_id)
         if self._stopping or thread_id in self._refused:
             self._interrupts.append((thread_id, turn_id))
-        # A descendant not yet announced still counts as running work.
+        subagent = self._subagents.get(thread_id)
         return self._begin(subagent, turn_id) if subagent is not None else []
 
     def _begin(self, subagent: _Subagent, turn_id: str) -> list[dict[str, Any]]:

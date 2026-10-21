@@ -51,6 +51,9 @@ STOP_TIMEOUT_SECONDS = 5.0
 ABORT_TIMEOUT_SECONDS = 1.0
 # A host tool call can overtake the queued notification that identifies its turn.
 TOOL_OWNERSHIP_WAIT_SECONDS = 30.0
+# After the parent turn, how long a message to an idle sub-agent may take to
+# start its turn. A message that starts none settles once this elapses.
+SUBAGENT_INTERACTION_GRACE_SECONDS = 5.0
 
 
 class _InactivityTimeout(Exception):
@@ -448,7 +451,15 @@ class CodexHarness:
                     if state.status not in (None, "completed") and not stopping:
                         stopping = True
                         await self._interrupt(subagents.stop())
-                    frame = await self._next_notification()
+                    if state.status is not None and subagents.awaiting_interactions:
+                        try:
+                            async with asyncio.timeout(SUBAGENT_INTERACTION_GRACE_SECONDS):
+                                frame = await self._next_notification()
+                        except TimeoutError:
+                            subagents.expire_interactions()
+                            continue
+                    else:
+                        frame = await self._next_notification()
                     for event in (*state.accept(frame), *subagents.accept(frame)):
                         await emit(event)
                     await self._interrupt(subagents.take_interrupts())

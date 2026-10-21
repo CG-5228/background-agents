@@ -142,9 +142,10 @@ def test_subagent_resumed_by_a_later_prompt_is_billed_from_its_known_total():
     first.accept(turn_completed("child-turn"))
 
     later = CodexSubagents("m2", PARENT, "turn-2", "gpt-6.1-sol", totals)
-    # A message to an idle sub-agent shows a task only once it starts a turn.
+    # A message to an idle sub-agent shows a task only once it starts a turn,
+    # but the prompt waits to learn whether it does.
     assert later.accept(activity("interacted", turn="turn-2")) == []
-    assert not later.busy
+    assert later.busy and later.awaiting_interactions
     started = later.accept(turn_started("child-turn-2", root="turn-2"))
     assert tasks(started)[0]["callId"] == f"codex:turn-2:agent:{CHILD}"
     [step] = later.accept(usage(130, 15, turn="child-turn-2"))
@@ -248,9 +249,77 @@ def test_turn_reported_before_its_announcement_is_projected():
     subagents = build()
     assert subagents.accept(turn_started("child-turn")) == []
     assert subagents.busy
+    assert not subagents.owns(CHILD, "child-turn")
     events = subagents.accept(activity("started"))
-    assert [e["type"] for e in events] == ["tool_call", "step_start"]
+    assert [e["type"] for e in events] == ["tool_call", "tool_call", "step_start"]
     assert subagents.owns(CHILD, "child-turn")
+
+
+def test_turn_finished_before_its_announcement_settles_and_is_projected():
+    subagents = build()
+    command = {"type": "commandExecution", "id": "c1", "command": "ls", "status": "completed"}
+    message = {"type": "agentMessage", "id": "a1", "text": "Done."}
+    for frame in (
+        turn_started("child-turn"),
+        item("item/completed", command),
+        item("item/completed", message),
+        usage(100, 10),
+        turn_completed("child-turn"),
+    ):
+        assert subagents.accept(frame) == []
+    assert not subagents.busy
+    events = subagents.accept(activity("started"))
+    assert not subagents.busy
+    task = tasks(events)[-1]
+    assert (task["status"], task["output"]) == ("completed", "Done.")
+    [tool] = [e for e in events if e["type"] == "tool_call" and e["tool"] == "bash"]
+    assert tool["taskCallId"] == TASK
+    assert [e for e in events if e["type"] == "step_finish"][-1]["reason"] == "completed"
+
+
+def test_turn_rooted_at_another_prompt_is_not_owned_or_projected():
+    subagents = build()
+    subagents.accept(activity("started"))
+    subagents.accept(turn_started("child-turn"))
+    subagents.accept(turn_completed("child-turn"))
+    assert subagents.accept(turn_started("foreign-turn", root="other-root")) == []
+    assert not subagents.owns(CHILD, "foreign-turn")
+    assert not subagents.busy
+    command = {"type": "commandExecution", "id": "c2"}
+    assert subagents.accept(item("item/completed", command, turn="foreign-turn")) == []
+
+
+def test_message_to_an_idle_subagent_waits_for_the_turn_it_may_start():
+    subagents = build()
+    subagents.accept(activity("started"))
+    subagents.accept(turn_started("child-turn"))
+    subagents.accept(turn_completed("child-turn"))
+    # Re-tasked within the prompt; its turn has not been reported yet.
+    subagents.accept(activity("interacted"))
+    assert subagents.busy and subagents.awaiting_interactions
+    started = subagents.accept(turn_started("child-turn-2"))
+    assert tasks(started)[0]["status"] == "running"
+    assert subagents.busy and not subagents.awaiting_interactions
+    subagents.accept(turn_completed("child-turn-2"))
+    assert not subagents.busy
+
+    # A message that starts no turn settles once interactions expire.
+    subagents.accept(activity("interacted"))
+    subagents.expire_interactions()
+    assert not subagents.busy
+
+
+def test_unannounced_frames_of_a_refused_descendant_are_dropped():
+    subagents = build()
+    subagents.accept(activity("started"))
+    subagents.accept(turn_started("child-turn"))
+    subagents.accept(turn_started("grand-turn", thread="grandchild"))
+    subagents.accept(
+        item("item/completed", {"type": "commandExecution", "id": "g"}, thread="grandchild")
+    )
+    subagents.accept(activity("started", thread=CHILD, turn="child-turn", agent="grandchild"))
+    assert subagents._unannounced == {}
+    assert subagents._unannounced_frames == 0
 
 
 def test_stop_reports_running_turns_and_any_that_start_later():
