@@ -24,6 +24,11 @@ TOKEN_FIELDS = (
     "totalTokens",
 )
 MAX_SAFE_TOKEN_COUNT = 2**53 - 1
+PLAN_STEP_STATUSES = {
+    "pending": "pending",
+    "inProgress": "in_progress",
+    "completed": "completed",
+}
 # Native diagnostics can embed HTTP bodies; keep user-facing notices short.
 MAX_DIAGNOSTIC_CHARS = 500
 RATE_LIMIT_WARNING_PERCENT = 90
@@ -159,6 +164,21 @@ def _tool_output(kind: str, item: dict[str, Any]) -> str:
     return output if isinstance(output, str) else json.dumps(output)
 
 
+def _plan_todos(plan: Any) -> list[dict[str, str]]:
+    """Project native plan steps onto the web task list's todowrite contract."""
+    if not isinstance(plan, list):
+        return []
+    return [
+        {
+            "content": step["step"],
+            # The web task list treats unknown statuses as pending.
+            "status": PLAN_STEP_STATUSES.get(str(step.get("status")), "pending"),
+        }
+        for step in plan
+        if isinstance(step, dict) and isinstance(step.get("step"), str)
+    ]
+
+
 class CodexRateLimits:
     """Account-level quota state, kept across turns, that warns only on escalation.
 
@@ -247,6 +267,7 @@ class CodexTurnEvents:
         self.tokens: dict[str, Any] | None = None
         self.usage_valid = True
         self.has_usage = False
+        self._plan_updates = 0
 
     def start(self) -> dict[str, Any]:
         return {
@@ -350,6 +371,22 @@ class CodexTurnEvents:
                 "total": counts["totalTokens"],
             }
             return [self.finish()]
+        if method == "turn/plan/updated":
+            # Each update is a distinct call: upserts keep a callId's first
+            # timeline slot, and the task list shows the latest todowrite.
+            self._plan_updates += 1
+            explanation = params.get("explanation")
+            return [
+                {
+                    "type": "tool_call",
+                    "messageId": self.message_id,
+                    "callId": f"codex:{self.turn_id}:plan:{self._plan_updates}",
+                    "tool": "todowrite",
+                    "args": {"todos": _plan_todos(params.get("plan"))},
+                    "status": "completed",
+                    "output": explanation if isinstance(explanation, str) else "",
+                }
+            ]
         if method == "item/agentMessage/delta":
             item_id = str(params.get("itemId"))
             self._record_text(item_id, str(params.get("delta", "")))
