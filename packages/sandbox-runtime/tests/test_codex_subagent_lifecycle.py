@@ -174,9 +174,8 @@ async def test_abort_interrupts_the_parent_and_its_running_subagents(tmp_path):
     assert (await asyncio.wait_for(prompt, 5)).cancelled
 
 
-async def test_abnormal_exit_distrusts_subagent_usage(tmp_path):
+async def test_abnormal_exit_releases_the_prompts_subagents(tmp_path):
     harness, _, queue, _ = build(tmp_path)
-    harness._subagent_totals["older-subagent"] = {"totalTokens": 10}
 
     async def failing_emit(event):
         if event.get("tool") == "task":
@@ -185,41 +184,23 @@ async def test_abnormal_exit_distrusts_subagent_usage(tmp_path):
     queue.put_nowait(spawned())
     with pytest.raises(RuntimeError, match="sink failed"):
         await harness.run_prompt(HarnessPrompt("m", "delegate"), failing_emit)
-    assert harness._subagent_totals == {}
     assert harness._subagents is None
 
 
-def interacted(agent=CHILD):
-    frame = spawned(agent)
-    frame["params"]["item"] = {**frame["params"]["item"], "kind": "interacted"}
-    return frame
-
-
-async def test_parent_completing_before_a_messaged_subagent_starts_still_waits(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setattr("sandbox_runtime.harness.codex.SUBAGENT_INTERACTION_GRACE_SECONDS", 5)
-    harness, _, queue, _ = build(tmp_path)
-    events = []
-    for frame in (interacted(), completed(PARENT, TURN)):
+async def test_child_spawning_before_its_announcement_is_still_limited(tmp_path):
+    harness, _, queue, interrupts = build(tmp_path)
+    for frame in (
+        started(CHILD, "child-turn"),
+        spawned("grandchild", thread=CHILD, turn="child-turn"),
+        started("grandchild", "grand-turn"),
+        spawned(),
+        completed("grandchild", "grand-turn", "interrupted"),
+        completed(CHILD, "child-turn"),
+        completed(PARENT, TURN),
+    ):
         queue.put_nowait(frame)
-    prompt = asyncio.create_task(run(harness, events))
-    await asyncio.sleep(0.05)
-    assert not prompt.done()
-    for frame in (started(CHILD, "child-turn"), completed(CHILD, "child-turn")):
-        queue.put_nowait(frame)
-    assert (await asyncio.wait_for(prompt, 5)).success
-    assert [e for e in events if e.get("tool") == "task"][-1]["status"] == "completed"
-
-
-async def test_message_that_starts_no_turn_settles_after_the_grace_period(tmp_path, monkeypatch):
-    monkeypatch.setattr("sandbox_runtime.harness.codex.SUBAGENT_INTERACTION_GRACE_SECONDS", 0.05)
-    harness, _, queue, _ = build(tmp_path)
-    events = []
-    for frame in (interacted(), completed(PARENT, TURN)):
-        queue.put_nowait(frame)
-    assert (await asyncio.wait_for(run(harness, events), 5)).success
-    assert not [e for e in events if e.get("tool") == "task"]
+    assert (await asyncio.wait_for(run(harness, []), 5)).success
+    assert interrupts == [("grandchild", "grand-turn")]
 
 
 async def test_subagent_finished_before_its_announcement_settles(tmp_path):

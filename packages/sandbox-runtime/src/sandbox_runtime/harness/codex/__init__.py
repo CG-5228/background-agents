@@ -51,9 +51,6 @@ STOP_TIMEOUT_SECONDS = 5.0
 ABORT_TIMEOUT_SECONDS = 1.0
 # A host tool call can overtake the queued notification that identifies its turn.
 TOOL_OWNERSHIP_WAIT_SECONDS = 30.0
-# After the parent turn, how long a message to an idle sub-agent may take to
-# start its turn. A message that starts none settles once this elapses.
-SUBAGENT_INTERACTION_GRACE_SECONDS = 5.0
 
 
 class _InactivityTimeout(Exception):
@@ -106,10 +103,8 @@ class CodexHarness:
         self._epoch = ""
         self._total: dict[str, int] = {}
         self._usage_baseline_known = True
-        # Sub-agents of the running prompt, and every sub-agent thread's last
-        # trusted cumulative usage (a later prompt can resume a sub-agent).
+        # Sub-agents of the running prompt.
         self._subagents: CodexSubagents | None = None
-        self._subagent_totals: dict[str, dict[str, int]] = {}
         # Notified after each projected frame, for tool calls awaiting ownership.
         self._frames = asyncio.Condition()
         # Account quota state outlives a turn; each turn projects into it.
@@ -380,7 +375,6 @@ class CodexHarness:
             else self.limits.prompt_max_duration_seconds
         )
         deadline = asyncio.get_running_loop().time() + max(0, duration)
-        settled = False
         try:
             async with asyncio.timeout_at(deadline):
                 await self.open()
@@ -436,9 +430,7 @@ class CodexHarness:
                     rate_limits=self._rate_limits,
                     baseline_known=baseline_known,
                 )
-                subagents = CodexSubagents(
-                    prompt.message_id, self.session_id, self._turn_id, model, self._subagent_totals
-                )
+                subagents = CodexSubagents(prompt.message_id, self.session_id, self._turn_id, model)
                 self._subagents = subagents
                 await emit(state.start())
                 # The transport queue retains notifications delivered before the
@@ -451,15 +443,7 @@ class CodexHarness:
                     if state.status not in (None, "completed") and not stopping:
                         stopping = True
                         await self._interrupt(subagents.stop())
-                    if state.status is not None and subagents.awaiting_interactions:
-                        try:
-                            async with asyncio.timeout(SUBAGENT_INTERACTION_GRACE_SECONDS):
-                                frame = await self._next_notification()
-                        except TimeoutError:
-                            subagents.expire_interactions()
-                            continue
-                    else:
-                        frame = await self._next_notification()
+                    frame = await self._next_notification()
                     for event in (*state.accept(frame), *subagents.accept(frame)):
                         await emit(event)
                     await self._interrupt(subagents.take_interrupts())
@@ -468,7 +452,6 @@ class CodexHarness:
                     if self._total != state.total:
                         self._total = state.total
                         self._persist()
-                settled = True
                 self._usage_baseline_known = state.status == "completed" and state.has_usage
                 self._persist()
                 await emit(state.finish())
@@ -559,10 +542,6 @@ class CodexHarness:
             self._usage_baseline_known = False
             raise
         finally:
-            if not settled:
-                # Contained or abandoned sub-agent work may have outrun its last
-                # observed usage, like the parent's baseline above.
-                self._subagent_totals.clear()
             self._subagents = None
             async with self._frames:
                 self._frames.notify_all()
@@ -649,7 +628,11 @@ class CodexHarness:
             return False
 
         def decided() -> bool:
-            return self._subagents is not subagents or subagents.owns(thread_id, turn_id)
+            return (
+                self._subagents is not subagents
+                or subagents.owns(thread_id, turn_id)
+                or subagents.refuses(thread_id)
+            )
 
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(TOOL_OWNERSHIP_WAIT_SECONDS), self._frames:
