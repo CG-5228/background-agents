@@ -1,15 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { computeHmacHex } from "@open-inspect/shared/auth";
 import { deriveVncPassword } from "../sandbox-env";
-import {
-  assertBoatEnvWithinLimits,
-  BOAT_LAUNCHER_PATH,
-  BOAT_SANDBOX_VERSION,
-  BOAT_TUNNEL_ENV_FILE_PATH,
-  boatIdempotencyKey,
-  resolveBoatMachineType,
-  resolveBoatTtlSeconds,
-} from "./boat-provider";
+import { BOAT_LAUNCHER_PATH, BOAT_SANDBOX_VERSION, boatIdempotencyKey } from "../boat-lifecycle";
+import { BOAT_TUNNEL_ENV_FILE_PATH } from "./boat-provider";
 import {
   baseCreateConfig,
   boatSandbox,
@@ -18,7 +11,7 @@ import {
   providerConfig,
   createProvider,
 } from "./boat-provider.test-helpers";
-import { SandboxProviderError } from "../provider";
+import { PrebuiltImageUnavailableError, SandboxProviderError } from "../provider";
 import {
   BoatApiError,
   BoatCancelledError,
@@ -622,6 +615,65 @@ describe("BoatSandboxProvider", () => {
     });
   });
 
+  describe("prebuilt images", () => {
+    it("deploys a session from its prebuilt image and marks the boot", async () => {
+      const client = mockClient();
+      await createProvider(client, providerConfig).createSandbox({
+        ...baseCreateConfig,
+        prebuiltImageId: "oi-img-o-r-0123456789abcdef",
+        prebuiltImageSha: "abc123",
+      });
+      const [params] = vi.mocked(client.createSandbox).mock.calls[0];
+      expect(params.from).toBe("oi-img-o-r-0123456789abcdef");
+      expect(createEnv(client)).toMatchObject({
+        FROM_REPO_IMAGE: "true",
+        REPO_IMAGE_SHA: "abc123",
+        RESTORED_FROM_SNAPSHOT: "false",
+        IMAGE_BUILD_MODE: "false",
+      });
+      expect(client.startDetachedCommand).toHaveBeenCalledWith("bx_abcdefgh", BOAT_LAUNCHER_PATH);
+    });
+
+    it("states FROM_REPO_IMAGE=false and sends no sha for a base-snapshot spawn", async () => {
+      const client = mockClient();
+      await createProvider(client, providerConfig).createSandbox({
+        ...baseCreateConfig,
+        userEnvVars: { FROM_REPO_IMAGE: "true", REPO_IMAGE_SHA: "evil" },
+      });
+      const env = createEnv(client);
+      expect(env.FROM_REPO_IMAGE).toBe("false");
+      expect(env).not.toHaveProperty("REPO_IMAGE_SHA");
+    });
+
+    it("retires an image Boat no longer has instead of failing the session", async () => {
+      const client = mockClient({
+        createSandbox: vi.fn(async () => {
+          throw new BoatNotFoundError("no named snapshot", "snapshot_not_found");
+        }),
+      });
+      const error = await createProvider(client, providerConfig)
+        .createSandbox({ ...baseCreateConfig, prebuiltImageId: "oi-img-gone" })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(PrebuiltImageUnavailableError);
+      expect(client.createSandbox).toHaveBeenCalledTimes(1);
+      expect(client.deleteSandbox).not.toHaveBeenCalled();
+    });
+
+    it("keeps a 404 on a base-snapshot create an ordinary permanent failure", async () => {
+      const client = mockClient({
+        createSandbox: vi.fn(async () => {
+          throw new BoatNotFoundError("no named snapshot", "snapshot_not_found");
+        }),
+      });
+      const error = await createProvider(client, providerConfig)
+        .createSandbox(baseCreateConfig)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(SandboxProviderError);
+      expect(error).not.toBeInstanceOf(PrebuiltImageUnavailableError);
+      expect((error as SandboxProviderError).errorType).toBe("permanent");
+    });
+  });
+
   describe("error classification", () => {
     it.each([
       [new BoatApiError("rate limited", 429, "rate_limited"), "transient"],
@@ -646,64 +698,5 @@ describe("BoatSandboxProvider", () => {
       expect((error as SandboxProviderError).errorType).toBe(expected);
       expect((error as SandboxProviderError).cause).toBe(cause);
     });
-  });
-});
-
-describe("resolveBoatMachineType", () => {
-  it("returns the fallback when nothing is requested", () => {
-    expect(resolveBoatMachineType(undefined, "default")).toBe("default");
-    expect(resolveBoatMachineType({ cpuCores: null, memoryMib: null }, "small")).toBe("small");
-  });
-
-  it("picks the smallest size satisfying both dimensions", () => {
-    expect(resolveBoatMachineType({ cpuCores: 1 }, "default")).toBe("small");
-    expect(resolveBoatMachineType({ memoryMib: 5000 }, "small")).toBe("default");
-    expect(resolveBoatMachineType({ cpuCores: 2, memoryMib: 16384 }, "small")).toBe("large");
-    expect(resolveBoatMachineType({ cpuCores: 16 }, "small")).toBe("xlarge");
-  });
-
-  it("rejects a request no size can satisfy", () => {
-    expect(() => resolveBoatMachineType({ cpuCores: 32 }, "default")).toThrow(SandboxProviderError);
-    expect(() => resolveBoatMachineType({ memoryMib: 65536 }, "default")).toThrow(
-      /exceed the largest Boat machine type/
-    );
-  });
-});
-
-describe("resolveBoatTtlSeconds", () => {
-  it("defaults, rounds and clamps to Boat's bounds", () => {
-    expect(resolveBoatTtlSeconds(undefined)).toBe(7200);
-    expect(resolveBoatTtlSeconds(90.4)).toBe(90);
-    expect(resolveBoatTtlSeconds(0)).toBe(1);
-    expect(resolveBoatTtlSeconds(99_999_999)).toBe(2_592_000);
-  });
-});
-
-describe("assertBoatEnvWithinLimits", () => {
-  it("accepts an ordinary env", () => {
-    expect(() => assertBoatEnvWithinLimits({ A: "1", _b2: "x".repeat(1000) })).not.toThrow();
-  });
-
-  it("names invalid keys without their values", () => {
-    expect(() => assertBoatEnvWithinLimits({ "BAD-KEY": "secret-value" })).toThrow(
-      /BAD-KEY(?!.*secret-value)/
-    );
-  });
-
-  it("enforces the variable count and total size", () => {
-    const many = Object.fromEntries(Array.from({ length: 101 }, (_, i) => [`K${i}`, "v"]));
-    expect(() => assertBoatEnvWithinLimits(many)).toThrow(/101 variables/);
-    expect(() => assertBoatEnvWithinLimits({ BIG: "x".repeat(64 * 1024) })).toThrow(/bytes/);
-  });
-});
-
-describe("boatIdempotencyKey", () => {
-  it("is deterministic per deployment, session and sandbox, and distinct across them", async () => {
-    const key = await boatIdempotencyKey("prod", "sess-a", "sb-1");
-    expect(key).toMatch(/^openinspect-[a-f0-9]{64}$/);
-    expect(await boatIdempotencyKey("prod", "sess-a", "sb-1")).toBe(key);
-    expect(await boatIdempotencyKey("staging", "sess-a", "sb-1")).not.toBe(key);
-    expect(await boatIdempotencyKey("prod", "sess-a", "sb-2")).not.toBe(key);
-    expect(await boatIdempotencyKey("prod", "sess-b", "sb-1")).not.toBe(key);
   });
 });
