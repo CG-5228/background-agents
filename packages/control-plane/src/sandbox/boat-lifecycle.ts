@@ -77,10 +77,26 @@ const LAUNCHER_ALREADY_RUNNING_EXIT_CODE = 75;
 /**
  * The file whose presence lets a create-time launch proceed. The control
  * plane writes it (see {@link BoatSandboxLifecycle.releaseLaunch}) only once
- * the sandbox is private and its tunnel env file is in place, so the runtime
+ * the sandbox is private and its tunnel env file is staged, so the runtime
  * can outrun neither. Under `/tmp`, which no Boat snapshot keeps.
  */
 export const BOAT_LAUNCH_MARKER_PATH = "/tmp/openinspect-launch";
+/**
+ * Where the runtime reads its tunnel URLs: `/workspace/.tunnels.env`, through
+ * the `/workspace` link the launcher keeps into the home directory. Boat's
+ * file API writes under `/home/user` and `/tmp`.
+ */
+export const BOAT_TUNNEL_ENV_FILE_PATH = "/home/user/workspace/.tunnels.env";
+/**
+ * Where a create writes the tunnel env file for the setup script to copy into
+ * place. A create's writes land while the machine is still coming up, and
+ * Boat mounts the snapshot's filesystem over the home directory as part of
+ * that, so a file put under `/home/user` that early is hidden once the mount
+ * is in place and the runtime waits its full timeout for it. `/tmp` is
+ * outside the snapshot and keeps such a write, as it keeps the launch marker.
+ * A resume writes the file into place directly: its machine is already up.
+ */
+export const BOAT_TUNNEL_ENV_STAGING_PATH = "/tmp/openinspect-tunnels.env";
 /** How long the setup script waits for the marker before giving up, in 200 ms polls. */
 const LAUNCH_MARKER_POLLS = 1500;
 /**
@@ -92,17 +108,27 @@ const LAUNCH_MARKER_POLLS = 1500;
  * `exec`s the launcher, which execs into the runtime in turn, so the script
  * never returns and Boat reports it `running` for the sandbox's life; a
  * launcher that exits at once shows as `failed`, with the exit code and
- * stderr in `setupError`, and so does a marker that never arrives. A resume
+ * stderr in `setupError`, and so do a marker that never arrives and a tunnel
+ * env file that could not be copied into place. A resume
  * cannot use it (it is create-time only) and starts the launcher with
  * {@link BoatSandboxLifecycle.launchRuntime} instead.
  */
 export const BOAT_SETUP_SCRIPT = [
   "#!/bin/bash",
   "# Started by Boat the moment the machine is up. The control plane writes the",
-  "# launch marker once the sandbox is private and its tunnel env file is in",
-  "# place, so the runtime can outrun neither.",
+  "# launch marker once the sandbox is private and its tunnel env file is",
+  "# staged, so the runtime can outrun neither. The staged file is copied into",
+  "# the workspace here, with the snapshot mounted over the home directory;",
+  "# written there any earlier, it would be hidden by that mount. A copy that",
+  "# fails ends the launch, as a launcher that exits at once does, rather than",
+  "# starting a runtime that would wait for URLs this side has already handed out.",
   `for _ in $(seq 1 ${LAUNCH_MARKER_POLLS}); do`,
   `  if [ -f ${BOAT_LAUNCH_MARKER_PATH} ]; then`,
+  `    if [ -f ${BOAT_TUNNEL_ENV_STAGING_PATH} ]; then`,
+  `      mkdir -p "$(dirname ${BOAT_TUNNEL_ENV_FILE_PATH})" &&`,
+  `        cp ${BOAT_TUNNEL_ENV_STAGING_PATH} ${BOAT_TUNNEL_ENV_FILE_PATH} ||`,
+  '        { echo "tunnel env file copy failed" >&2; exit 1; }',
+  "    fi",
   `    exec ${BOAT_LAUNCHER_PATH}`,
   "  fi",
   "  sleep 0.2",
