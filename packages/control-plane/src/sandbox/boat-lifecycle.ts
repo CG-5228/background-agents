@@ -74,6 +74,43 @@ const BOAT_MAX_NAME_CHARS = 120;
  */
 export const BOAT_LAUNCHER_PATH = "/home/user/openinspect/launcher.sh";
 const LAUNCHER_ALREADY_RUNNING_EXIT_CODE = 75;
+/**
+ * The file whose presence lets a create-time launch proceed. The control
+ * plane writes it (see {@link BoatSandboxLifecycle.releaseLaunch}) only once
+ * the sandbox is private and its tunnel env file is in place, so the runtime
+ * can outrun neither. Under `/tmp`, which no Boat snapshot keeps.
+ */
+export const BOAT_LAUNCH_MARKER_PATH = "/tmp/openinspect-launch";
+/** How long the setup script waits for the marker before giving up, in 200 ms polls. */
+const LAUNCH_MARKER_POLLS = 1500;
+/**
+ * What a session create hands Boat as its `setupScript`. Boat runs it through
+ * bash as the sandbox user, with the create-time env applied, the moment the
+ * machine is up, so the runtime starts with the machine instead of after the
+ * control plane has noticed it: the way Modal and Daytona start the runtime
+ * as the container's command. It waits for the launch marker first, then
+ * `exec`s the launcher, which execs into the runtime in turn, so the script
+ * never returns and Boat reports it `running` for the sandbox's life; a
+ * launcher that exits at once shows as `failed`, with the exit code and
+ * stderr in `setupError`, and so does a marker that never arrives. A resume
+ * cannot use it (it is create-time only) and starts the launcher with
+ * {@link BoatSandboxLifecycle.launchRuntime} instead.
+ */
+export const BOAT_SETUP_SCRIPT = [
+  "#!/bin/bash",
+  "# Started by Boat the moment the machine is up. The control plane writes the",
+  "# launch marker once the sandbox is private and its tunnel env file is in",
+  "# place, so the runtime can outrun neither.",
+  `for _ in $(seq 1 ${LAUNCH_MARKER_POLLS}); do`,
+  `  if [ -f ${BOAT_LAUNCH_MARKER_PATH} ]; then`,
+  `    exec ${BOAT_LAUNCHER_PATH}`,
+  "  fi",
+  "  sleep 0.2",
+  "done",
+  'echo "launch marker never arrived" >&2',
+  "exit 1",
+  "",
+].join("\n");
 
 /**
  * A Boat sandbox id is interpolated into one command line (a build's launch)
@@ -84,6 +121,8 @@ const BOAT_SANDBOX_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 /** Idempotent create attempts after a lost response. */
 const CREATE_ATTEMPTS = 3;
+/** Tries for the launch-marker write before a create gives up. */
+const LAUNCH_RELEASE_ATTEMPTS = 3;
 
 /** How long a flow waits, and how often it looks, at each step of a sandbox's life. */
 export interface BoatLifecycleTimings {
@@ -396,7 +435,8 @@ export class BoatSandboxLifecycle {
    * private, and a shared sandbox lets every member run commands in it, which
    * would hand them whatever the sandbox holds. A personal sandbox (no
    * visibility) needs nothing. Failing closed is the point: a sandbox that
-   * cannot be made private must not boot.
+   * cannot be made private never gets its launch marker, so its runtime never
+   * starts, and the create path deletes it.
    */
   async ensurePrivate(sandbox: BoatSandbox): Promise<void> {
     if (sandbox.visibility !== "shared") return;
@@ -480,6 +520,66 @@ export class BoatSandboxLifecycle {
         log.info("boat.runtime_started", { sandbox_id: boatSandboxId, process_id: processId });
         return;
       }
+    }
+  }
+
+  /**
+   * Let a create-time launch proceed: write the marker the setup script waits
+   * for. Called once the sandbox is private and its tunnel env file is in
+   * place, and usually while the machine is still provisioning, since Boat
+   * accepts file writes before the machine is live. A write that fails after
+   * a few tries fails the create, so the runtime never starts without it.
+   */
+  async releaseLaunch(boatSandboxId: string): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.client.writeFile(boatSandboxId, {
+          path: BOAT_LAUNCH_MARKER_PATH,
+          content: "released\n",
+        });
+        return;
+      } catch (error) {
+        if (attempt >= LAUNCH_RELEASE_ATTEMPTS) throw error;
+        log.warn("boat.launch_release_retry", {
+          sandbox_id: boatSandboxId,
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await delayUnlessCancelled(this.timings.createRetryDelayMs);
+      }
+    }
+  }
+
+  /**
+   * Watch Boat's create-time launch briefly for an early exit, as the
+   * detached start did: from the moment the launcher can have started (the
+   * later of machine-up and the marker write) until the settle window closes,
+   * any exit is a failed launch and `setupError` says how. `running` is the
+   * normal steady state, since the launcher never returns; readiness beyond
+   * the window is the bridge's phone-home and the connecting timeout, as on
+   * every provider. Create-time only: a resumed sandbox still carries its
+   * create's status, which says nothing about the machine the resume brought
+   * up.
+   */
+  async confirmLaunch(boatSandboxId: string, launchedAtMs: number): Promise<void> {
+    const settleUntilMs = launchedAtMs + this.timings.launchSettleMs;
+    for (;;) {
+      const sandbox = await this.client.getSandbox(boatSandboxId);
+      if (sandbox.setupStatus === "failed" || sandbox.setupStatus === "done") {
+        const detail = (sandbox.setupError ?? "").trim().slice(-400);
+        throw new SandboxProviderError(
+          `Boat runtime launcher exited${detail ? `: ${detail}` : ""}`,
+          "permanent"
+        );
+      }
+      if (Date.now() >= settleUntilMs) {
+        log.info("boat.runtime_started", {
+          sandbox_id: boatSandboxId,
+          setup_status: sandbox.setupStatus ?? null,
+        });
+        return;
+      }
+      await delayUnlessCancelled(this.timings.launchPollIntervalMs);
     }
   }
 
