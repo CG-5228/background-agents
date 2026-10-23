@@ -2,8 +2,8 @@
  * How a Boat sandbox is brought up, driven and brought down, shared by the
  * session provider (providers/boat-provider.ts) and the image-build resources
  * (image-builds/boat-build-resources.ts): the idempotent create, the wait for
- * a running machine, privacy, naming, the detached launch of the baked
- * launcher, the archive that stops a sandbox with its disk saved, and the
+ * a running machine, privacy, the detached launch of the baked launcher, the
+ * archive that stops a sandbox with its disk saved, and the
  * classification of a failed call. What a sandbox is for — a session's env
  * and ports, a build's callback contract — stays with each caller.
  */
@@ -18,6 +18,7 @@ import {
   BoatNotFoundError,
   delayUnlessCancelled,
   type BoatCreateSandboxParams,
+  type BoatCreatedSandbox,
   type BoatMachineType,
   type BoatRestClient,
   type BoatSandbox,
@@ -77,64 +78,41 @@ const LAUNCHER_ALREADY_RUNNING_EXIT_CODE = 75;
 /**
  * The file whose presence lets a create-time launch proceed. The control
  * plane writes it (see {@link BoatSandboxLifecycle.releaseLaunch}) only once
- * the sandbox is private and its tunnel env file is staged, so the runtime
- * can outrun neither. Under `/tmp`, which no Boat snapshot keeps.
+ * the sandbox is known private and its tunnel env file is in the workspace,
+ * so the runtime can outrun neither. Under `/tmp`, which no Boat snapshot
+ * keeps, so no image or restored disk can carry one.
  */
 export const BOAT_LAUNCH_MARKER_PATH = "/tmp/openinspect-launch";
 /**
  * Where the runtime reads its tunnel URLs: `/workspace/.tunnels.env`, through
  * the `/workspace` link the launcher keeps into the home directory. Boat's
- * file API writes under `/home/user` and `/tmp`.
+ * file API writes under `/home/user` and `/tmp`, and a write to a sandbox that
+ * is still starting waits until it is ready, so even a create's write lands on
+ * the disk the sandbox keeps.
  */
 export const BOAT_TUNNEL_ENV_FILE_PATH = "/home/user/workspace/.tunnels.env";
-/**
- * Where a create writes the tunnel env file for the setup script to copy into
- * place. A create's writes land while the machine is still coming up, and
- * Boat mounts the snapshot's filesystem over the home directory as part of
- * that, so a file put under `/home/user` that early is hidden once the mount
- * is in place and the runtime waits its full timeout for it. `/tmp` is
- * outside the snapshot and keeps such a write, as it keeps the launch marker.
- * A resume writes the file into place directly: its machine is already up.
- */
-export const BOAT_TUNNEL_ENV_STAGING_PATH = "/tmp/openinspect-tunnels.env";
-/** How long the setup script waits for the marker before giving up, in 200 ms polls. */
-const LAUNCH_MARKER_POLLS = 1500;
 /**
  * What a session create hands Boat as its `setupScript`. Boat runs it through
  * bash as the sandbox user, with the create-time env applied, the moment the
  * machine is up, so the runtime starts with the machine instead of after the
  * control plane has noticed it: the way Modal and Daytona start the runtime
- * as the container's command. It waits for the launch marker first, then
- * `exec`s the launcher, which execs into the runtime in turn, so the script
- * never returns and Boat reports it `running` for the sandbox's life; a
- * launcher that exits at once shows as `failed`, with the exit code and
- * stderr in `setupError`, and so do a marker that never arrives and a tunnel
- * env file that could not be copied into place. A resume
- * cannot use it (it is create-time only) and starts the launcher with
- * {@link BoatSandboxLifecycle.launchRuntime} instead.
+ * as the container's command. It waits for the launch marker first, for as
+ * long as the create takes to release it, retries included: a deadline of its
+ * own could only expire while this side is still completing the create, and a
+ * sandbox whose create fails is deleted, its script with it. Then it `exec`s
+ * the launcher, which execs into the runtime in turn, so the script never
+ * returns and Boat reports it `running` for the sandbox's life; a launcher
+ * that exits at once shows as `failed`, with the exit code and stderr in
+ * `setupError`. A resume cannot use it (it is create-time only) and starts
+ * the launcher with {@link BoatSandboxLifecycle.launchRuntime} instead.
  */
 export const BOAT_SETUP_SCRIPT = [
   "#!/bin/bash",
   "# Started by Boat the moment the machine is up. The control plane writes the",
-  "# launch marker once the sandbox is private and its tunnel env file is",
-  "# staged, so the runtime can outrun neither. The staged file is copied into",
-  "# the workspace here, with the snapshot mounted over the home directory;",
-  "# written there any earlier, it would be hidden by that mount. A copy that",
-  "# fails ends the launch, as a launcher that exits at once does, rather than",
-  "# starting a runtime that would wait for URLs this side has already handed out.",
-  `for _ in $(seq 1 ${LAUNCH_MARKER_POLLS}); do`,
-  `  if [ -f ${BOAT_LAUNCH_MARKER_PATH} ]; then`,
-  `    if [ -f ${BOAT_TUNNEL_ENV_STAGING_PATH} ]; then`,
-  `      mkdir -p "$(dirname ${BOAT_TUNNEL_ENV_FILE_PATH})" &&`,
-  `        cp ${BOAT_TUNNEL_ENV_STAGING_PATH} ${BOAT_TUNNEL_ENV_FILE_PATH} ||`,
-  '        { echo "tunnel env file copy failed" >&2; exit 1; }',
-  "    fi",
-  `    exec ${BOAT_LAUNCHER_PATH}`,
-  "  fi",
-  "  sleep 0.2",
-  "done",
-  'echo "launch marker never arrived" >&2',
-  "exit 1",
+  "# launch marker once the sandbox is known private and its tunnel env file is",
+  "# in the workspace, so the runtime can outrun neither.",
+  `until [ -f ${BOAT_LAUNCH_MARKER_PATH} ]; do sleep 0.2; done`,
+  `exec ${BOAT_LAUNCHER_PATH}`,
   "",
 ].join("\n");
 
@@ -415,9 +393,10 @@ export class BoatSandboxLifecycle {
   /**
    * Create under an idempotency key, repeating the same request after a lost
    * response. Boat answers a repeat with the same key and body with the first
-   * sandbox, so a retry never starts a second machine or spends a second start.
+   * sandbox, and with the routes of the ports it hosted, so a retry never
+   * starts a second machine or spends a second start.
    */
-  async createSandbox(params: BoatCreateSandboxParams): Promise<BoatSandbox> {
+  async createSandbox(params: BoatCreateSandboxParams): Promise<BoatCreatedSandbox> {
     for (let attempt = 1; ; attempt++) {
       try {
         return await this.client.createSandbox(params);
@@ -472,13 +451,15 @@ export class BoatSandboxLifecycle {
   }
 
   /**
-   * Make a sandbox an organization pays for private before it is used. Boat
-   * starts such sandboxes `shared` unless the organization's default is
-   * private, and a shared sandbox lets every member run commands in it, which
-   * would hand them whatever the sandbox holds. A personal sandbox (no
-   * visibility) needs nothing. Failing closed is the point: a sandbox that
-   * cannot be made private never gets its launch marker, so its runtime never
-   * starts, and the create path deletes it.
+   * Make sure a sandbox an organization pays for is private before it is
+   * used: a shared sandbox lets every member run commands in it, which would
+   * hand them whatever the sandbox holds. A create asks Boat for a private
+   * sandbox, which Boat sets before the sandbox has a machine, so a fresh one
+   * passes without a call, as does a personal sandbox (no visibility). One
+   * that still reports `shared`, because Boat did not honor the request or
+   * someone has shared it since, is unshared here. Failing closed is the
+   * point: a sandbox that cannot be made private never gets its launch
+   * marker, so its runtime never starts, and a create deletes it.
    */
   async ensurePrivate(sandbox: BoatSandbox): Promise<void> {
     if (sandbox.visibility !== "shared") return;
@@ -490,22 +471,6 @@ export class BoatSandboxLifecycle {
       );
     }
     log.info("boat.sandbox_made_private", { sandbox_id: sandbox.id });
-  }
-
-  /**
-   * Label the sandbox in Boat's dashboard. Create assigns a display name of
-   * its own, so this is a second call, and a cosmetic one: a failure is
-   * logged, never fatal.
-   */
-  async nameSandbox(boatSandboxId: string, name: string): Promise<void> {
-    try {
-      await this.client.updateSandbox(boatSandboxId, { name });
-    } catch (error) {
-      log.warn("boat.name_sandbox_failed", {
-        sandbox_id: boatSandboxId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 
   /**
@@ -567,10 +532,11 @@ export class BoatSandboxLifecycle {
 
   /**
    * Let a create-time launch proceed: write the marker the setup script waits
-   * for. Called once the sandbox is private and its tunnel env file is in
-   * place, and usually while the machine is still provisioning, since Boat
-   * accepts file writes before the machine is live. A write that fails after
-   * a few tries fails the create, so the runtime never starts without it.
+   * for. Called once the sandbox is known private and its tunnel env file is
+   * in the workspace. Boat holds a write to a sandbox that is still starting
+   * until it is ready, so the marker lands about when the machine comes up. A
+   * write that fails after a few tries fails the create, so the runtime never
+   * starts without it.
    */
   async releaseLaunch(boatSandboxId: string): Promise<void> {
     for (let attempt = 1; ; attempt++) {

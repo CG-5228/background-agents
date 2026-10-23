@@ -5,7 +5,6 @@ import {
   BOAT_LAUNCHER_PATH,
   BOAT_SETUP_SCRIPT,
   BOAT_TUNNEL_ENV_FILE_PATH,
-  BOAT_TUNNEL_ENV_STAGING_PATH,
   BoatSandboxLifecycle,
   boatIdempotencyKey,
   resolveBoatMachineType,
@@ -85,27 +84,21 @@ describe("BoatSandboxLifecycle archive", () => {
 });
 
 describe("BOAT_SETUP_SCRIPT", () => {
-  it("waits for the marker, copies the staged tunnel env file into the workspace, then execs the launcher", () => {
-    const marker = BOAT_SETUP_SCRIPT.indexOf(`[ -f ${BOAT_LAUNCH_MARKER_PATH} ]`);
-    const staged = BOAT_SETUP_SCRIPT.indexOf(`[ -f ${BOAT_TUNNEL_ENV_STAGING_PATH} ]`);
-    const copy = BOAT_SETUP_SCRIPT.indexOf(
-      `cp ${BOAT_TUNNEL_ENV_STAGING_PATH} ${BOAT_TUNNEL_ENV_FILE_PATH}`
+  it("waits for the launch marker as long as it takes, then execs the launcher", () => {
+    const wait = BOAT_SETUP_SCRIPT.indexOf(
+      `until [ -f ${BOAT_LAUNCH_MARKER_PATH} ]; do sleep 0.2; done`
     );
     const exec = BOAT_SETUP_SCRIPT.indexOf(`exec ${BOAT_LAUNCHER_PATH}`);
-    expect(marker).toBeGreaterThan(-1);
-    expect(staged).toBeGreaterThan(marker);
-    expect(copy).toBeGreaterThan(staged);
-    expect(exec).toBeGreaterThan(copy);
-    // A copy that fails ends the setup script non-zero instead of starting a
-    // runtime that would wait for URLs the create has already handed out.
-    const copyFailure = BOAT_SETUP_SCRIPT.indexOf(
-      'echo "tunnel env file copy failed" >&2; exit 1;'
-    );
-    expect(copyFailure).toBeGreaterThan(copy);
-    expect(copyFailure).toBeLessThan(exec);
-    // The staging path is outside the home directory, which Boat's snapshot
-    // mount covers; the destination is where the runtime reads the file.
-    expect(BOAT_TUNNEL_ENV_STAGING_PATH.startsWith("/tmp/")).toBe(true);
+    expect(wait).toBeGreaterThan(-1);
+    expect(exec).toBeGreaterThan(wait);
+    // No deadline of its own: one could expire while a create is still
+    // completing its retries, and a sandbox whose create fails is deleted.
+    expect(BOAT_SETUP_SCRIPT).not.toContain("exit 1");
+    // Under /tmp, which no Boat snapshot keeps: no image or restored disk can
+    // carry a marker that would let a launch outrun this side.
+    expect(BOAT_LAUNCH_MARKER_PATH.startsWith("/tmp/")).toBe(true);
+    // Nothing is copied: the control plane writes the tunnel env file in place.
+    expect(BOAT_SETUP_SCRIPT).not.toContain("cp ");
     expect(BOAT_TUNNEL_ENV_FILE_PATH).toBe("/home/user/workspace/.tunnels.env");
   });
 });

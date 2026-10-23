@@ -385,17 +385,17 @@ Things to know:
   deployed from the image always gets its own env. Treat a scope's image as no less sensitive than
   the scope's secrets all the same: its filesystem holds whatever `setup.sh` wrote, as the
   [credential trust boundary](#credential-trust-boundary) already requires.
-- **Organization sandboxes.** A build sandbox billed to a Boat organization is made private before
-  anything of the build is delivered to it, exactly as a session sandbox is. Set the organization's
-  default visibility for new sandboxes to private so no sandbox is ever shared
-  ([Boat provider guide](./BOAT_SANDBOX_PROVIDER.md#billing-to-an-organization)).
+- **Organization sandboxes.** A build sandbox is created private, exactly as a session sandbox is:
+  Boat sets the visibility before the sandbox has a machine, so nothing of the build ever reaches a
+  shared sandbox ([Boat provider guide](./BOAT_SANDBOX_PROVIDER.md#billing-to-an-organization)).
 - **Build machine.** The build runs on the machine size the scope's CPU and memory settings select,
   the same size its sessions get, so `setup.sh` has at build time the memory it will have at
   runtime.
 - **A create whose response is lost** is repeated under the same idempotency key, and Boat answers
   with the first sandbox. Should every attempt lose its response, the sandbox holds nothing of the
   build (its env never arrived), stops by itself at its TTL, and Boat deletes its data 14 days
-  later; Boat's create API has no name or label the control plane could find it by sooner.
+  later. The create names the sandbox, but nothing looks a sandbox up by that name to reclaim it
+  sooner.
 - **Starts.** Each build spends one Boat sandbox start against the plan's start limits; the save and
   the deploys from the image spend none beyond each session's own.
 
