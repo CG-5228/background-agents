@@ -24,7 +24,7 @@ from .runtime_config import BootMode, RuntimeConfig
 
 if TYPE_CHECKING:
     import signal
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from .agent_bridge_process import AgentBridgeProcess
     from .boot_events import BootEventLog
@@ -52,6 +52,27 @@ OPENCODE_MODELS_REFRESH_TIMEOUT_SECONDS = 120.0
 
 class BootExecutionCancelled(Exception):
     """A handled process signal interrupted boot work."""
+
+
+async def run_boot_phases_together(
+    boot_events: BootEventLog, phases: Sequence[Awaitable[None]]
+) -> None:
+    """Run independent boot phases concurrently and raise the first failure.
+
+    Every phase runs to its end, so each writes its own ``completed`` or
+    ``failed`` line, and the failure raised is the earliest phase's in the
+    order given. Sibling lines may have outrun that failure by then, and the
+    control plane keeps only the newest sequence, so the failure is written
+    once more as the final line before it is raised: the fatal report then
+    carries a sequence nothing has passed.
+    """
+    outcomes = await asyncio.gather(*phases, return_exceptions=True)
+    failure = next((o for o in outcomes if isinstance(o, BaseException)), None)
+    if failure is None:
+        return
+    if isinstance(failure, BootPhaseError):
+        boot_events.republish_failure(failure)
+    raise failure
 
 
 def record_boot_complete(environment: Mapping[str, str], log: Any) -> None:
@@ -646,13 +667,11 @@ class SandboxSupervisor:
         """
         # Materialization is sandbox-boot work; OpenCode process restarts
         # reuse this tree and must not depend on control-plane availability.
-        if self.managed_skills is not None:
-            with self.boot_events.phase_scope("skills"):
-                await self.managed_skills.materialize(boot_result.repositories, boot_result.workdir)
-
-        if self.memory is not None:
-            with self.boot_events.phase_scope("memory"):
-                await self.memory.materialize()
+        # Skills and memory come from the control plane independently and
+        # land in different places, so they are fetched side by side.
+        await run_boot_phases_together(
+            self.boot_events, [self._materialize_skills(boot_result), self._materialize_memory()]
+        )
 
         try:
             await self.code_server.start(boot_result.workdir)
@@ -669,6 +688,18 @@ class SandboxSupervisor:
         # bridge to attach its harness and report `ready`.
         with self.boot_events.phase_scope("harness"):
             await self.harness_process.start(boot_result.repositories, boot_result.workdir)
+
+    async def _materialize_skills(self, boot_result: RepositoryBootResult) -> None:
+        if self.managed_skills is None:
+            return
+        with self.boot_events.phase_scope("skills"):
+            await self.managed_skills.materialize(boot_result.repositories, boot_result.workdir)
+
+    async def _materialize_memory(self) -> None:
+        if self.memory is None:
+            return
+        with self.boot_events.phase_scope("memory"):
+            await self.memory.materialize()
 
     async def run(self, repo_image_callback: RepoImageBuildCallback | None = None) -> bool:
         startup_start = time.time()
