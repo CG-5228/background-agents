@@ -9,12 +9,14 @@ import {
   AutomationForm,
   type AutomationFormValues,
 } from "@/components/automations/automation-form";
+import { automationToFormValues } from "@/components/automations/automation-form-policy";
 import { AutomationFormSkeleton } from "@/components/automations/automation-form-skeleton";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { BackIcon } from "@/components/ui/icons";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 import { useSWRConfig } from "swr";
 import { invalidateAutomationCache } from "@/lib/automation-cache";
+import { automationApiPath } from "@/lib/automation-navigation";
 import { useAutomationScope } from "@/hooks/use-automation-scope";
 import {
   sameEnvironmentIds,
@@ -47,7 +49,7 @@ export default function EditAutomationPage({ params }: { params: Promise<{ id: s
       // Unchanged targets are omitted so an edit that leaves them alone is not
       // revalidated as a target replacement.
       const { repositories, environmentIds, ...otherValues } = values;
-      const res = await browserApiFetch(`/api/automations/${id}`, {
+      const res = await browserApiFetch(automationApiPath(id), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -124,22 +126,7 @@ export default function EditAutomationPage({ params }: { params: Promise<{ id: s
 
           <AutomationForm
             mode="edit"
-            initialValues={{
-              teamId: automation.ownerTeamId ?? null,
-              name: automation.name,
-              repositories: automation.repositories,
-              environmentIds: automation.environmentIds,
-              harness: automation.harness,
-              model: automation.model,
-              reasoningEffort: automation.reasoningEffort,
-              scheduleCron: automation.scheduleCron ?? "0 9 * * *",
-              scheduleTz: automation.scheduleTz,
-              instructions: automation.instructions,
-              triggerType: automation.triggerType,
-              eventType: automation.eventType ?? undefined,
-              triggerConfig: automation.triggerConfig ?? undefined,
-              providerSelections: automation.providerSelections,
-            }}
+            initialValues={automationToFormValues(automation)}
             onSubmit={handleSubmit}
             submitting={submitting}
           />
