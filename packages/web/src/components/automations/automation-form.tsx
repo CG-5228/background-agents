@@ -13,6 +13,7 @@ import { useEnabledModels } from "@/hooks/use-enabled-models";
 import { reconcileProviderSelectionsForHarness } from "@open-inspect/shared/harnesses";
 import { resolveHarnessModelSelection } from "@/lib/session-harness";
 import { SUBSCRIPTION_PROVIDER_IDS } from "@open-inspect/shared/types/provider-accounts";
+import { MAX_AUTOMATION_NAME_LENGTH } from "@open-inspect/shared/types/automations";
 import { useProviderAccounts } from "@/hooks/use-provider-accounts";
 import { ProviderAuthControls } from "@/components/provider-auth-controls";
 import { setProviderSelection } from "@/lib/provider-selection";
@@ -31,7 +32,9 @@ import {
 import {
   createAutomationFormDraft,
   evaluateAutomationForm,
+  automationOwnerSelectable,
   requiresRepositoryContext,
+  withoutOwnerBoundConditions,
   type AutomationAgentDraft,
   type AutomationFormValues,
 } from "./automation-form-policy";
@@ -56,11 +59,7 @@ export function AutomationForm({
   const [teamId, setTeamId] = useState(initialValues?.teamId ?? null);
   const scope = useResourceTeams("automation");
   const allowWorkspace = scope.allowWorkspace && !requireTeam;
-  const scopeValid =
-    mode === "edit" ||
-    (!scope.loading &&
-      !scope.error &&
-      (teamId ? scope.teams.some((team) => team.id === teamId) : allowWorkspace));
+  const scopeValid = mode === "edit" || automationOwnerSelectable(teamId, scope, requireTeam);
   const { repos, loading: loadingRepos } = useRepos(true, teamId);
   const { environments, loading: loadingEnvironments } = useEnvironments({ ownerTeamId: teamId });
   const { enabledModels, enabledModelOptions, loading: loadingModels } = useEnabledModels();
@@ -182,6 +181,10 @@ export function AutomationForm({
           if (submitting || mode === "edit") return;
           setTeamId(nextTeamId);
           targets.resetTargets();
+          setTrigger((current) => ({
+            ...current,
+            conditions: withoutOwnerBoundConditions(current.conditions),
+          }));
         }}
       />
       <AutomationTriggerTypeField mode={mode} value={trigger} onChange={setTrigger} />
@@ -200,7 +203,7 @@ export function AutomationForm({
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder={isSchedule ? "Daily code review" : "Review new PRs"}
-          maxLength={200}
+          maxLength={MAX_AUTOMATION_NAME_LENGTH}
           required
         />
       </div>
