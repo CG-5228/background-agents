@@ -7,6 +7,7 @@ import {
   AutomationForm,
   type AutomationFormValues,
 } from "@/components/automations/automation-form";
+import { AutomationFormSkeleton } from "@/components/automations/automation-form-skeleton";
 import { WebhookConfig } from "@/components/automations/webhook-config";
 import { automationTemplates } from "@/lib/automation-templates";
 import { Button } from "@/components/ui/button";
@@ -193,15 +194,29 @@ function NewAutomationContent() {
   );
 }
 
+// Search params are what suspended, so the scope-preserving back link can't be
+// built yet; keep the sidebar controls so the layout doesn't shift on load.
+function NewAutomationFallback() {
+  const { isOpen } = useSidebarContext();
+  return (
+    <AutomationFormSkeleton
+      mode="create"
+      header={
+        !isOpen && (
+          <header className="border-b border-border-muted flex-shrink-0">
+            <div className="px-4 py-3 flex items-center gap-2">
+              <CollapsedSidebarControls />
+            </div>
+          </header>
+        )
+      }
+    />
+  );
+}
+
 export default function NewAutomationPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="h-full flex items-center justify-center">
-          <div className="animate-spin rounded-full h-6 w-6 border-2 border-current border-t-transparent text-muted-foreground" />
-        </div>
-      }
-    >
+    <Suspense fallback={<NewAutomationFallback />}>
       <NewAutomationContent />
     </Suspense>
   );
