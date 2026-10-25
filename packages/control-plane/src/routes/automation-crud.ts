@@ -100,6 +100,12 @@ import { authorizeTeamRepositories } from "./workspace-repository-authorization"
 
 const logger = createLogger("router:automations");
 
+/**
+ * Only scheduled firings retry a failed launch, so other triggers cannot allow any. Zero, the
+ * default, stays accepted so a client can send back an automation it read.
+ */
+const MAX_RETRIES_SCHEDULE_ONLY_ERROR = "maxRetries above 0 is only valid for schedule triggers";
+
 async function handleCreateAutomation(
   request: Request,
   env: Env,
@@ -222,6 +228,7 @@ async function handleCreateAutomation(
     if (body.scheduleCron || body.scheduleTz) {
       return error("scheduleCron and scheduleTz are only valid for schedule triggers", 400);
     }
+    if (body.maxRetries) return error(MAX_RETRIES_SCHEDULE_ONLY_ERROR, 400);
   }
 
   const eventTypeError = getTriggerEventTypeError(triggerType, body.eventType);
@@ -365,6 +372,7 @@ async function handleCreateAutomation(
     enabled: 1,
     next_run_at: nextRunAt,
     consecutive_failures: 0,
+    max_retries: body.maxRetries ?? 0,
     created_by: enforced.participantUserId,
     user_id: resolvedUserId,
     created_at: now,
@@ -482,6 +490,9 @@ async function handleUpdateAutomation(
 
   if (body.triggerConfig !== undefined && existingTriggerType === "schedule") {
     return error("Cannot set triggerConfig on schedule automations", 400);
+  }
+  if (body.maxRetries && existingTriggerType !== "schedule") {
+    return error(MAX_RETRIES_SCHEDULE_ONLY_ERROR, 400);
   }
 
   let replacementProviderSelections: ModelProviderSelections | null = null;
@@ -604,6 +615,7 @@ async function handleUpdateAutomation(
   if (body.instructions !== undefined) updateFields.instructions = body.instructions;
   if (body.scheduleCron !== undefined) updateFields.schedule_cron = body.scheduleCron;
   if (body.scheduleTz !== undefined) updateFields.schedule_tz = body.scheduleTz;
+  if (body.maxRetries !== undefined) updateFields.max_retries = body.maxRetries;
   if (body.harness !== undefined) updateFields.harness = nextHarness;
   if (body.model !== undefined) updateFields.model = nextModel;
   // A harness switch can invalidate the stored effort just like a model change.
