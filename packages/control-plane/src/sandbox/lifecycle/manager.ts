@@ -393,12 +393,23 @@ function buildSandboxIdForSession(session: SessionRow, now: number): string {
 /** Which client-visible start a launch announces: a prompt's spawn or typing's warm-up. */
 export type SandboxStartupIntent = "spawn" | "warm";
 
+/**
+ * What a fatal report's termination did, for the queue to apply.
+ * `terminated`: the sandbox is down and a replacement may run queued work.
+ * `stop_failed`: the row was failed and counted toward the circuit breaker,
+ * but teardown did not complete, so nothing may replace it yet.
+ * `retries_exhausted`: the failure opened the circuit breaker, so no
+ * replacement will be admitted for the prompt the boot was for.
+ */
+export type FatalTerminationOutcome =
+  "terminated" | "stop_failed" | "retries_exhausted" | "not_terminated";
+
 export interface SandboxLifecycle {
   spawnSandbox(intent?: SandboxStartupIntent): Promise<void>;
   updateLastActivity(timestamp: number): void;
   onPromptDispatched(): void;
   terminateUnresponsiveSandbox(trigger: UnresponsiveSandboxTrigger): Promise<void>;
-  terminateFailedSandbox(reason: string): Promise<boolean>;
+  terminateFailedSandbox(reason: string): Promise<FatalTerminationOutcome>;
   reportSandboxError(reason: string): void;
 }
 
@@ -1828,26 +1839,29 @@ export class SandboxLifecycleManager
 
   /**
    * Fail the live sandbox after a fatal runtime report and stop it where the
-   * provider allows. Resolves true only when this call took the sandbox down,
-   * which is the caller's cue to re-evaluate the queue. Serving executions
-   * remain fenced by preservation until explicit recovery; only failed boots
-   * may automatically get a clean replacement, and a failed boot of the
-   * retained source is held instead. A row
-   * that is already dead — including one the connect watchdog failed while
-   * its boot was still running — resolves false: there is nothing to
-   * terminate, and re-driving the queue for it would spawn a replacement for
+   * provider allows. Resolves `terminated` only when this call took the
+   * sandbox down, which is the caller's cue to re-evaluate the queue, and
+   * `stop_failed` when it failed the row but the provider refused the stop.
+   * Either becomes `retries_exhausted` when this failure opened the circuit
+   * breaker.
+   * Serving executions remain fenced by preservation until explicit recovery;
+   * only failed boots may automatically get a clean replacement, and a failed
+   * boot of the retained source is held instead. A row that is already dead —
+   * including one the connect watchdog failed while its boot was still
+   * running — resolves `not_terminated`: there is nothing to terminate, and
+   * re-driving the queue for it would spawn a replacement for
    * every late report. A termination counts toward the circuit breaker, so a
    * boot that dies the same way every time stops being replaced.
    */
-  async terminateFailedSandbox(reason: string): Promise<boolean> {
+  async terminateFailedSandbox(reason: string): Promise<FatalTerminationOutcome> {
     if (this.shutdown.isHolding()) {
       // Teardown waits for the hold; the report is kept until it can act.
       this.shutdown.recordRuntimeFailure(reason);
-      return false;
+      return "not_terminated";
     }
     const sandbox = this.storage.getSandbox();
     if (!sandbox || isDeadSandboxStatus(sandbox.status) || this.isTerminatingSandbox) {
-      return false;
+      return "not_terminated";
     }
 
     this.log.warn("Fatal sandbox runtime error", {
@@ -1856,36 +1870,50 @@ export class SandboxLifecycleManager
       error: reason,
     });
     this.isTerminatingSandbox = true;
+    // Once the row is failed and counted, a later cleanup throw must not hide
+    // that, or an exhausted boot's prompt is left pending.
+    let countedOutcome: FatalTerminationOutcome = "not_terminated";
     try {
       const ownership = await this.shutdown.requestShutdown("fatal_runtime_error", "emergency");
       if (ownership !== "unmanaged") {
         this.recordSpawnFailure(Date.now(), sandbox.created_at);
         this.reportSandboxError(reason);
-        return ownership === "owned";
+        if (ownership !== "owned") return "not_terminated";
+        return this.isCircuitBreakerOpen(Date.now()) ? "retries_exhausted" : "terminated";
       }
-      if (!this.isCurrentSandboxState(sandbox)) return false;
+      if (!this.isCurrentSandboxState(sandbox)) return "not_terminated";
       const held = this.holdFailedRetainedBoot(sandbox, reason);
       this.storage.updateSandboxStatus("failed");
       this.recordSpawnFailure(Date.now(), sandbox.created_at);
+      const retriesExhausted = this.isCircuitBreakerOpen(Date.now());
+      if (!held) countedOutcome = retriesExhausted ? "retries_exhausted" : "stop_failed";
       this.broadcaster.broadcast({ type: "sandbox_status", status: "failed" });
       this.reportSandboxError(reason);
       this.access.clearAccess();
-      if (held) return false;
+      if (held) return "not_terminated";
 
       const canStopProvider = this.canStopProviderSandbox();
       if (!canStopProvider) this.wsManager.sendToSandbox({ type: "shutdown" });
       this.wsManager.detachSandboxWebSocket(1011, "Fatal sandbox runtime error");
 
-      if (canStopProvider) await this.stopProviderSandbox("fatal_runtime_error", "destroy");
+      if (canStopProvider) {
+        const stopped = await this.stopProviderSandboxSafely({
+          reason: "fatal_runtime_error",
+          intent: "destroy",
+          failureMessage: "Provider stop failed after fatal runtime error",
+        });
+        if (!stopped) return countedOutcome;
+      }
+      if (retriesExhausted) return "retries_exhausted";
     } catch (error) {
-      this.log.warn("Provider stop failed after fatal runtime error", {
+      this.log.warn("Fatal runtime termination failed", {
         error: error instanceof Error ? error.message : String(error),
       });
-      return false;
+      return countedOutcome;
     } finally {
       this.isTerminatingSandbox = false;
     }
-    return true;
+    return "terminated";
   }
 
   /**

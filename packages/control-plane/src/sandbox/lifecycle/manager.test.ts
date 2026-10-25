@@ -695,6 +695,100 @@ describe("idle queue redrive", () => {
   });
 });
 
+describe("fatal runtime report termination", () => {
+  const exhaustingFailureCount = DEFAULT_LIFECYCLE_CONFIG.circuitBreaker.threshold - 1;
+  const stopSucceeds = { success: true };
+  const stopRejected = { success: false, error: "provider unavailable" };
+
+  function fatalReportHarness(
+    sandbox: Parameters<typeof createMockSandbox>[0],
+    stop: { success: boolean; error?: string } = stopSucceeds,
+    wsManager = createMockWebSocketManager()
+  ) {
+    const storage = createMockStorage(createMockSession(), createMockSandbox(sandbox));
+    const stopSandbox = vi.fn(async () => stop);
+    const manager = createTestLifecycleManager(
+      createMockProvider({ capabilities: { supportsExplicitStop: true }, stopSandbox }),
+      storage,
+      storage,
+      createMockBroadcaster(),
+      wsManager,
+      createMockAlarmScheduler(),
+      createMockIdGenerator(),
+      createUnmanagedShutdown(),
+      createTestConfig()
+    );
+    return { manager, storage, stopSandbox };
+  }
+
+  it.each([
+    { stop: stopSucceeds, priorFailures: 0, outcome: "terminated" },
+    { stop: stopRejected, priorFailures: 0, outcome: "stop_failed" },
+    { stop: stopSucceeds, priorFailures: exhaustingFailureCount, outcome: "retries_exhausted" },
+    { stop: stopRejected, priorFailures: exhaustingFailureCount, outcome: "retries_exhausted" },
+  ])(
+    "resolves $outcome once the row is failed (stop ok: $stop.success, prior failures: $priorFailures)",
+    async ({ stop, priorFailures, outcome }) => {
+      const { manager, storage, stopSandbox } = fatalReportHarness(
+        {
+          status: "connecting",
+          modal_object_id: "modal-obj-booting",
+          spawn_failure_count: priorFailures,
+          last_spawn_failure: priorFailures > 0 ? Date.now() : 0,
+        },
+        stop
+      );
+
+      await expect(manager.terminateFailedSandbox("git sync failed")).resolves.toBe(outcome);
+
+      expect(stopSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({ providerObjectId: "modal-obj-booting" })
+      );
+      expect(storage.getSandbox()?.status).toBe("failed");
+    }
+  );
+
+  it.each([
+    { priorFailures: 0, outcome: "stop_failed" },
+    { priorFailures: exhaustingFailureCount, outcome: "retries_exhausted" },
+  ])(
+    "resolves $outcome when cleanup throws after the failure is counted (prior failures: $priorFailures)",
+    async ({ priorFailures, outcome }) => {
+      const wsManager = createMockWebSocketManager();
+      vi.mocked(wsManager.detachSandboxWebSocket).mockImplementation(() => {
+        throw new Error("storage write failed");
+      });
+      const { manager, storage, stopSandbox } = fatalReportHarness(
+        {
+          status: "connecting",
+          modal_object_id: "modal-obj-booting",
+          spawn_failure_count: priorFailures,
+          last_spawn_failure: priorFailures > 0 ? Date.now() : 0,
+        },
+        stopSucceeds,
+        wsManager
+      );
+
+      await expect(manager.terminateFailedSandbox("git sync failed")).resolves.toBe(outcome);
+
+      expect(stopSandbox).not.toHaveBeenCalled();
+      expect(storage.getSandbox()?.status).toBe("failed");
+    }
+  );
+
+  it("resolves not_terminated for a row that is already dead, even with retries exhausted", async () => {
+    const { manager, stopSandbox } = fatalReportHarness({
+      status: "failed",
+      spawn_failure_count: DEFAULT_LIFECYCLE_CONFIG.circuitBreaker.threshold,
+      last_spawn_failure: Date.now(),
+    });
+
+    await expect(manager.terminateFailedSandbox("late report")).resolves.toBe("not_terminated");
+
+    expect(stopSandbox).not.toHaveBeenCalled();
+  });
+});
+
 describe("fatal runtime report during a checkpoint hold", () => {
   it("records the failure instead of dropping it", async () => {
     const storage = createMockStorage(createMockSession(), createMockSandbox({ status: "ready" }));
@@ -711,7 +805,7 @@ describe("fatal runtime report during a checkpoint hold", () => {
       createTestConfig()
     );
 
-    await expect(manager.terminateFailedSandbox("runtime crashed")).resolves.toBe(false);
+    await expect(manager.terminateFailedSandbox("runtime crashed")).resolves.toBe("not_terminated");
 
     expect(shutdown.recordRuntimeFailure).toHaveBeenCalledExactlyOnceWith("runtime crashed");
   });
@@ -768,7 +862,7 @@ describe("fatal runtime report during a checkpoint hold", () => {
 
     const checkpoint = manager.triggerSnapshot("execution_complete");
     await vi.waitFor(() => expect(takeSnapshot).toHaveBeenCalledOnce());
-    await expect(manager.terminateFailedSandbox("runtime crashed")).resolves.toBe(false);
+    await expect(manager.terminateFailedSandbox("runtime crashed")).resolves.toBe("not_terminated");
     expect(broadcaster.messages).not.toContainEqual({
       type: "sandbox_error",
       error: "runtime crashed",

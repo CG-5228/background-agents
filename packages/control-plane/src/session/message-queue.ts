@@ -626,9 +626,24 @@ export class SessionMessageQueue {
   }
 
   async handleFatalSandboxFailure(reason: string): Promise<void> {
+    // Identified before termination, which may yield on provider I/O. A
+    // sandbox serving a prompt, or still confirming a stopped one, was not
+    // booting for the next one; the served prompt is already settled or is
+    // failStuckProcessingMessage's to settle.
+    const servingPrompt =
+      this.messageRepository.getProcessingMessage() ??
+      this.messageRepository.getMessageAwaitingStopConfirmation();
+    const bootPrompt = servingPrompt ? null : this.messageRepository.getNextPendingMessage();
     const termination = this.sandboxLifecycle.terminateFailedSandbox(reason);
     await this.failStuckProcessingMessage(reason);
-    if (await termination) await this.executionStop.resumeAfterSandboxTermination();
+    const outcome = await termination;
+    if (outcome === "retries_exhausted") {
+      // No replacement will be admitted, which would leave the prompt pending
+      // with its caller never told, so fail it as the connecting watchdog does.
+      if (bootPrompt) await this.failPendingMessage(bootPrompt.id, reason);
+      return;
+    }
+    if (outcome === "terminated") await this.executionStop.resumeAfterSandboxTermination();
   }
 
   /** Close every unfinished message synchronously; status projection happens afterwards. */
