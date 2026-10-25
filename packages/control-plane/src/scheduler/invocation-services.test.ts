@@ -19,6 +19,7 @@ const automation: AutomationRow = {
   instructions: "Run tests",
   trigger_type: "schedule",
   schedule_cron: "0 9 * * *",
+  schedule_once_at: null,
   schedule_tz: "UTC",
   harness: "codex",
   model: "openai/gpt-5.4",
@@ -78,6 +79,7 @@ function failureHarness(overrides: Partial<InvocationRunAggregate> = {}) {
     tryMarkInvocationFailureCounted: vi.fn().mockResolvedValue(true),
     incrementConsecutiveFailures: vi.fn().mockResolvedValue(3),
     autoPause: vi.fn().mockResolvedValue(undefined),
+    disableSettledOneShots: vi.fn().mockResolvedValue(undefined),
     resetConsecutiveFailures: vi.fn().mockResolvedValue(undefined),
   };
   return { store, service: new AutomationFailureService(store, log) };
@@ -288,6 +290,7 @@ function recoveryHarness() {
       getRunsPastExecutionDeadline: vi.fn().mockResolvedValue([]),
       bulkFailStartingRuns: vi.fn().mockResolvedValue(undefined),
       bulkFailRunningRuns: vi.fn().mockResolvedValue(undefined),
+      disableSettledOneShots: vi.fn().mockResolvedValue(undefined),
       getUncountedFailedInvocations: vi.fn().mockResolvedValue([]),
       getStaleFailureResetCandidates: vi.fn().mockResolvedValue([]),
     },

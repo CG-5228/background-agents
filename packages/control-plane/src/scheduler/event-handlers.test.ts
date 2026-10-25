@@ -21,6 +21,7 @@ const automation: AutomationRow = {
   instructions: "Run tests",
   trigger_type: "webhook",
   schedule_cron: null,
+  schedule_once_at: null,
   schedule_tz: "UTC",
   harness: "codex",
   model: "openai/gpt-5.4",
