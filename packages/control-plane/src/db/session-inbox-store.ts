@@ -267,8 +267,10 @@ export class SessionInboxStore {
   /** The filtered, viewer-visible, unarchived sessions with viewer-specific unread state. */
   private eligibleSessionsCte(options: InboxFilterOptions): { sql: string; params: unknown[] } {
     const { where, params } = buildSessionListPredicates(options);
+    // The recursive step and later CTEs reuse this set. Inlining it rescans
+    // the viewer's sessions for every re-rooted row.
     return {
-      sql: `eligible_sessions AS (
+      sql: `eligible_sessions AS MATERIALIZED (
               SELECT sessions.*, ${unreadSql("sessions")} AS unread
               -- Filter before viewer joins to keep shared predicates' columns unambiguous.
               FROM (
