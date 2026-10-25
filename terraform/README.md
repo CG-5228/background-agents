@@ -233,6 +233,7 @@ MODAL_API_SECRET
 # Sandbox provider
 SANDBOX_PROVIDER
 SANDBOX_INACTIVITY_TIMEOUT_MS # Optional; defaults to 600000
+SANDBOX_UNATTENDED_INACTIVITY_TIMEOUT_MS # Optional; defaults to 120000, minimum 60000
 SANDBOX_BOOT_TIMEOUT_MS       # Optional; defaults to 1800000, must exceed 240000
 
 # Daytona (only if SANDBOX_PROVIDER=daytona)
@@ -313,6 +314,15 @@ ENABLE_SERVICE_BINDINGS # Optional; defaults to true
 APP_NAME # Optional; defaults to Open-Inspect
 APP_ICON_URL
 ```
+
+### Sandbox Inactivity
+
+Set `sandbox_inactivity_timeout_ms` and `sandbox_unattended_inactivity_timeout_ms` in
+`terraform.tfvars`, or use the corresponding uppercase Actions settings above for CI deployments.
+Terraform passes them to the control-plane Worker as `SANDBOX_INACTIVITY_TIMEOUT_MS` and
+`SANDBOX_UNATTENDED_INACTIVITY_TIMEOUT_MS`. See
+[the CI/CD setup guide](../docs/GETTING_STARTED.md#set-up-cicd-optional) for which sessions use each
+timeout and what extends them.
 
 ## Module Reference
 

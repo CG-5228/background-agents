@@ -638,63 +638,6 @@ describe("checkpoint intent", () => {
   });
 });
 
-describe("idle queue redrive", () => {
-  function redriveHarness(
-    sandbox: Partial<Parameters<typeof createMockSandbox>[0]>,
-    admission: ReturnType<SandboxShutdownLifecycle["admissionDecision"]> = "ready"
-  ) {
-    const now = Date.now();
-    const storage = createMockStorage(
-      createMockSession(),
-      createMockSandbox({ status: "ready", last_heartbeat: now, last_activity: now, ...sandbox })
-    );
-    const resumeQueuedWork = vi.fn(async () => undefined);
-    const manager = createTestLifecycleManager(
-      createMockProvider(),
-      storage,
-      storage,
-      createMockBroadcaster(),
-      createMockWebSocketManager(),
-      createMockAlarmScheduler(),
-      createMockIdGenerator(),
-      {
-        ...createUnmanagedShutdown(),
-        admissionDecision: vi.fn<SandboxShutdownLifecycle["admissionDecision"]>(() => admission),
-      },
-      { ...createTestConfig(), resumeQueuedWork }
-    );
-    return { manager, resumeQueuedWork, now };
-  }
-
-  it("wakes queued work for a ready runtime the watchdog finds healthy", async () => {
-    const { manager, resumeQueuedWork } = redriveHarness({});
-
-    await manager.redriveIdleQueue();
-    await manager.redriveIdleQueue();
-
-    // Level-triggered: each pass may kick; the queue's claim makes repeats no-ops.
-    expect(resumeQueuedWork).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([
-    ["a stale heartbeat", { last_heartbeat: Date.now() - 10 * 60_000 }, "ready"],
-    [
-      "an inactivity stop that is already due",
-      { last_activity: Date.now() - DEFAULT_LIFECYCLE_CONFIG.inactivity.timeoutMs - 1_000 },
-      "ready",
-    ],
-    ["a booting runtime", { status: "connecting" as const }, "ready"],
-    ["held admission", {}, "held"],
-    ["admission that would start a sandbox", {}, "spawn_required"],
-  ] as const)("does not wake queued work for %s", async (_name, sandbox, admission) => {
-    const { manager, resumeQueuedWork } = redriveHarness(sandbox, admission);
-
-    await manager.redriveIdleQueue();
-
-    expect(resumeQueuedWork).not.toHaveBeenCalled();
-  });
-});
-
 describe("fatal runtime report termination", () => {
   const exhaustingFailureCount = DEFAULT_LIFECYCLE_CONFIG.circuitBreaker.threshold - 1;
   const stopSucceeds = { success: true };

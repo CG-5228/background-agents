@@ -53,7 +53,7 @@ import type { McpServerLookup, SlackAgentNotifyLookup } from "../sandbox/lifecyc
 // The composition root shares the internal access collaborator with shutdown and lifecycle only.
 // eslint-disable-next-line no-restricted-imports
 import { SandboxAccess } from "../sandbox/lifecycle/sandbox-access";
-import { resolveBootBudgetTimeoutMs } from "../sandbox/lifecycle/decisions";
+import { resolveLifecycleTimeouts } from "../sandbox/lifecycle/timeout-settings";
 import { McpServerStore } from "../db/mcp-servers";
 import { UserStore } from "../db/user-store";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
@@ -1161,23 +1161,10 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
     },
   };
 
-  // A malformed budget must not take every session down at construction the
-  // way a missing provider does; it falls back to the default and says so.
-  const bootBudget = resolveBootBudgetTimeoutMs(env.SANDBOX_BOOT_TIMEOUT_MS, {
-    connectingTimeoutMs: DEFAULT_LIFECYCLE_CONFIG.connectingTimeout.timeoutMs,
-    defaultTimeoutMs: DEFAULT_LIFECYCLE_CONFIG.bootBudget.timeoutMs,
-  });
-  if (bootBudget.rejectedValue !== null) {
-    createLogger("session-do", {}, parseLogLevel(env.LOG_LEVEL)).warn(
-      "Ignoring SANDBOX_BOOT_TIMEOUT_MS; using the default boot budget",
-      {
-        event: "config.invalid",
-        rejected_value: bootBudget.rejectedValue,
-        must_exceed_ms: DEFAULT_LIFECYCLE_CONFIG.connectingTimeout.timeoutMs,
-        timeout_ms: bootBudget.timeoutMs,
-      }
-    );
-  }
+  const timeouts = resolveLifecycleTimeouts(
+    env,
+    createLogger("session-do", {}, parseLogLevel(env.LOG_LEVEL))
+  );
   const config = {
     ...DEFAULT_LIFECYCLE_CONFIG,
     controlPlaneUrl,
@@ -1187,11 +1174,8 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
     // is written. Latched afterwards — the manager derives log context from
     // this on every log line, and the id is immutable once row-backed.
     getSessionId,
-    inactivity: {
-      ...DEFAULT_LIFECYCLE_CONFIG.inactivity,
-      timeoutMs: parseInt(env.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10),
-    },
-    bootBudget: { timeoutMs: bootBudget.timeoutMs },
+    inactivity: { ...DEFAULT_LIFECYCLE_CONFIG.inactivity, ...timeouts.inactivity },
+    bootBudget: timeouts.bootBudget,
     mcpServerLookup,
     slackAgentNotifyLookup,
     recordWarning: deps.recordWarning,
