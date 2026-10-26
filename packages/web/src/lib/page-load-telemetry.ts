@@ -1,4 +1,5 @@
 import { browserApiFetch } from "./browser-api-fetch";
+import type { useReportWebVitals } from "next/web-vitals";
 
 export type PageLoadMilestone =
   "auth_cleared" | "sidebar_populated" | "composer_ready" | "picker_ready";
@@ -44,9 +45,16 @@ export function markPageLoadMilestone(name: PageLoadMilestone): void {
   }
 }
 
-export function recordWebVital({ name, value, rating, id }: WebVital): void {
+export const recordWebVital: Parameters<typeof useReportWebVitals>[0] = (metric) => {
+  if (
+    metric.navigationType === "soft-navigation" ||
+    metric.navigationType === "back-forward-cache"
+  ) {
+    return;
+  }
+  const { name, value, rating, id } = metric;
   vitals.set(name, { name, value, rating, id });
-}
+};
 
 export function flushPageLoadTelemetry(reason: FlushReason): void {
   if (!pageLoad || seq >= MAX_REPORTS) return;
@@ -67,8 +75,12 @@ export function flushPageLoadTelemetry(reason: FlushReason): void {
   } catch {
     // A browser may refuse beacon delivery; keepalive is still worth trying.
   }
-  void browserApiFetch("/api/rum", { method: "POST", keepalive: true, body }).catch(() => {
-    // Telemetry must not surface errors to the application. A later flush may retry.
-    if (lastSent === snapshot) lastSent = undefined;
-  });
+  void browserApiFetch("/api/rum", { method: "POST", keepalive: true, body })
+    .then((response) => {
+      if (!response.ok) throw new Error("Telemetry delivery failed");
+    })
+    .catch(() => {
+      // Telemetry must not surface errors to the application. A later flush may retry.
+      if (lastSent === snapshot) lastSent = undefined;
+    });
 }

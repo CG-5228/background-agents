@@ -173,19 +173,22 @@ describe("POST /api/rum", () => {
       expect(console.error).not.toHaveBeenCalled();
     });
 
-    it.each([undefined, "https://foreign.example.com", "null", "not a URL"])(
-      "rejects Origin %s",
-      async (origin) => {
-        const request = beacon();
-        if (origin === undefined) request.headers.delete("origin");
-        else request.headers.set("origin", origin);
+    it.each([
+      undefined,
+      "https://foreign.example.com",
+      "http://app.example.com",
+      "null",
+      "not a URL",
+    ])("rejects Origin %s", async (origin) => {
+      const request = beacon();
+      if (origin === undefined) request.headers.delete("origin");
+      else request.headers.set("origin", origin);
 
-        const response = await POST(request);
+      const response = await POST(request);
 
-        expect(response.status).toBe(403);
-        expect(request.bodyUsed).toBe(false);
-      }
-    );
+      expect(response.status).toBe(403);
+      expect(request.bodyUsed).toBe(false);
+    });
 
     it("rejects oversized Content-Length before reading the body", async () => {
       const request = beacon(undefined, { "Content-Length": "8193" });

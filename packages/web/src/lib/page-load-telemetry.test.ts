@@ -95,6 +95,21 @@ describe("page-load telemetry", () => {
     expect(payload(1)).toMatchObject({ seq: 2, reason: "pagehide", vitals: [{ value: 300 }] });
   });
 
+  it.each(["soft-navigation", "back-forward-cache"])(
+    "does not replace hard-load vitals with %s measurements",
+    (navigationType) => {
+      telemetry.startPageLoadTelemetry();
+      const vital = { name: "LCP" as const, value: 250, rating: "good" as const, id: "hard-lcp" };
+      telemetry.recordWebVital({ ...vital, navigationType: "reload" });
+      window.history.replaceState(null, "", "/settings");
+      telemetry.recordWebVital({ ...vital, value: 300, navigationType: "reload" });
+      telemetry.recordWebVital({ ...vital, value: 0, id: "other-lcp", navigationType });
+      telemetry.flushPageLoadTelemetry("hidden");
+      expect(payload().vitals).toEqual([{ ...vital, value: 300 }]);
+      expect(payload().path).toBe("/");
+    }
+  );
+
   it.each(["missing", "false", "throws"])(
     "falls back to keepalive fetch when sendBeacon %s",
     async (mode) => {
@@ -120,6 +135,43 @@ describe("page-load telemetry", () => {
       await Promise.resolve();
     }
   );
+
+  it.each([403, 500, "network"] as const)(
+    "retries an unchanged snapshot after a %s failure",
+    async (failure) => {
+      sendBeacon.mockReturnValue(false);
+      if (failure === "network") vi.mocked(fetch).mockRejectedValueOnce(new Error("Unavailable"));
+      else vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: failure }));
+      telemetry.startPageLoadTelemetry();
+      telemetry.flushPageLoadTelemetry("timer");
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      telemetry.flushPageLoadTelemetry("hidden");
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(vi.mocked(fetch).mock.calls[1][1]!.body as string)).toMatchObject({
+        seq: 2,
+        reason: "hidden",
+      });
+    }
+  );
+
+  it("does not retry a newer delivered snapshot when an older fallback fails", async () => {
+    sendBeacon.mockReturnValueOnce(false);
+    let resolve!: (response: Response) => void;
+    vi.mocked(fetch).mockReturnValueOnce(
+      new Promise<Response>((done) => {
+        resolve = done;
+      })
+    );
+    telemetry.startPageLoadTelemetry();
+    telemetry.flushPageLoadTelemetry("timer");
+    telemetry.markPageLoadMilestone("picker_ready");
+    telemetry.flushPageLoadTelemetry("hidden");
+    resolve(new Response(null, { status: 500 }));
+    await new Promise<void>((done) => queueMicrotask(done));
+    telemetry.flushPageLoadTelemetry("pagehide");
+    expect(sendBeacon).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
 
   it("bounds repeated reports for long-lived tabs", () => {
     telemetry.startPageLoadTelemetry();

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/server-auth-session", () => ({ getServerAuthSession: vi.fn() }));
 vi.mock("@/lib/control-plane", () => ({ controlPlaneUserFetch: vi.fn() }));
@@ -22,6 +22,7 @@ function markReadRequest(
 }
 
 describe("session inbox read-state BFF", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     vi.resetAllMocks();
     vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "user-1" } } as never);
@@ -61,6 +62,7 @@ describe("session inbox read-state BFF", () => {
   });
 
   it("accepts the public host from X-Forwarded-Host behind a proxy", async () => {
+    vi.stubEnv("VERCEL", "1");
     vi.mocked(controlPlaneUserFetch).mockResolvedValue(Response.json({ markedCount: 0 }));
 
     const response = await POST(
@@ -70,6 +72,7 @@ describe("session inbox read-state BFF", () => {
           "Content-Type": "application/json; charset=utf-8",
           Origin: "https://inspect.example.com",
           "X-Forwarded-Host": "inspect.example.com",
+          "X-Forwarded-Proto": "https",
         }
       ) as never
     );
