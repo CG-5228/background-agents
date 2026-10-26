@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyMigrations } from "../node/migrate";
 import { createNodeSqlDatabase, type NodeSqlDatabase } from "../node/sqlite-database";
-import { SessionInboxStore } from "./session-inbox-store";
+import { SessionInboxStore, type InboxFilterOptions } from "./session-inbox-store";
 import type { SqlDatabase } from "./sql-database";
 
 const VIEWER_ID = "inbox-viewer";
@@ -22,7 +22,7 @@ beforeEach(() => {
 afterEach(() => db.close());
 
 describe("SessionInboxStore query plan", () => {
-  it("materializes eligible sessions instead of rescanning history during re-rooting", async () => {
+  it("materializes recursive queries but leaves unscoped bulk marking flattenable", async () => {
     await db
       .prepare("INSERT INTO users (id, created_at, updated_at) VALUES (?, 1, 1)")
       .bind(VIEWER_ID)
@@ -108,7 +108,7 @@ describe("SessionInboxStore query plan", () => {
       },
       batch: (statements) => db.batch(statements),
     };
-    const snapshot = await new SessionInboxStore(measured).snapshot({
+    const options: InboxFilterOptions = {
       viewerUserId: VIEWER_ID,
       createdByUserIds: [VIEWER_ID],
       scope: "all",
@@ -121,8 +121,9 @@ describe("SessionInboxStore query plan", () => {
         memberships: new Map(),
       },
       mode: "on",
-      limit: 1,
-    });
+    };
+    const inbox = new SessionInboxStore(measured);
+    const snapshot = await inbox.snapshot({ ...options, limit: 1 });
 
     expect(snapshot).toMatchObject({
       needs_attention: {
@@ -164,5 +165,31 @@ describe("SessionInboxStore query plan", () => {
       .map(({ detail }) => detail);
     expect(recursiveDetails.length).toBeGreaterThan(0);
     expect(recursiveDetails.some((detail) => /^(SEARCH|SCAN) sessions\b/.test(detail))).toBe(false);
+
+    for (const rootSessionId of [undefined, "attention-root"]) {
+      captured.length = 0;
+      const markedCount = await inbox.markAllRead(options, rootSessionId);
+      expect(markedCount).toBe(rootSessionId === undefined ? 1 : 0);
+      const markQuery = captured[0];
+      const markPlan = await db
+        .prepare(`EXPLAIN QUERY PLAN ${markQuery.sql}`)
+        .bind(...markQuery.values)
+        .all<{ detail: string }>();
+      expect(
+        markPlan.results.some(({ detail }) => detail.includes("MATERIALIZE eligible_sessions"))
+      ).toBe(rootSessionId !== undefined);
+      if (rootSessionId === undefined) {
+        expect(
+          markPlan.results.some(({ detail }) => /^SCAN eligible_sessions\b/.test(detail))
+        ).toBe(false);
+      }
+    }
+    const readStates = await db
+      .prepare("SELECT session_id, last_read_message_id FROM session_read_states WHERE user_id = ?")
+      .bind(VIEWER_ID)
+      .all();
+    expect(readStates.results).toEqual([
+      { session_id: "unread-child", last_read_message_id: "terminal-message" },
+    ]);
   });
 });
