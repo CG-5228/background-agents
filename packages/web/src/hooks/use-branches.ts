@@ -13,10 +13,11 @@ export function useBranches(repoOwner: string, repoName: string) {
       ? `/api/repos/${encodeURIComponent(repoOwner)}/${encodeURIComponent(repoName)}/branches`
       : null;
 
-  const { data, isLoading } = useSWR<BranchesResponse>(key);
+  const { data, error, isLoading } = useSWR<BranchesResponse>(key);
 
   return {
     branches: data?.branches ?? [],
     loading: isLoading,
+    settled: data !== undefined || error !== undefined,
   };
 }

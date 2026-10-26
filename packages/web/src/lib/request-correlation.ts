@@ -19,7 +19,7 @@ export function createRequestId(): string {
   return crypto.randomUUID().slice(0, REQUEST_ID_LENGTH);
 }
 
-function isValidTraceId(value: string | null | undefined): value is string {
+export function isValidTraceId(value: string | null | undefined): value is string {
   return Boolean(value && TRACE_ID_PATTERN.test(value));
 }
 

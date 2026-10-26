@@ -37,6 +37,7 @@ import {
 } from "@/lib/session-read-state";
 import { subscribeSessionScopeChanges } from "@/lib/session-scope";
 import { subscribeSessionTitleChanges } from "@/lib/session-title-events";
+import { usePageLoadMilestone } from "./use-page-load-milestone";
 
 const VISIBLE_INBOX_POLL_MS = 30_000;
 const SESSION_CREATOR_FILTER_STORAGE_KEY = "open-inspect-sidebar-session-creator-filter";
@@ -261,6 +262,7 @@ export function useSidebarSessions() {
       refreshWhenHidden: false,
     }
   );
+  usePageLoadMilestone("sidebar_populated", snapshot !== undefined || snapshotError !== undefined);
   const userId = authSession?.user.id ?? null;
   const paginationFilterIdentity = JSON.stringify([userId, mine, snapshotKey]);
   const nextPageSequence = useRef(0);

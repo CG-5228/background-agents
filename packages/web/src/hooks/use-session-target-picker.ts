@@ -119,6 +119,8 @@ export interface SessionTargetSelection {
   selectedBranch: string;
   repos: Repo[];
   loadingRepos: boolean;
+  loadingEnvironments: boolean;
+  branchesSettled: boolean;
   teamHasRepositoryGrants?: boolean;
   repositoryGrantError: string | null;
   /** The selected repository's metadata when the target is a single repo. */
@@ -220,10 +222,11 @@ export function useSessionTargetPicker({
 
   const selectedRepository =
     sessionTarget?.kind === "repo" ? parseRepositoryFullName(sessionTarget.repoFullName) : null;
-  const { branches, loading: loadingBranches } = useBranches(
-    selectedRepository?.repoOwner ?? "",
-    selectedRepository?.repoName ?? ""
-  );
+  const {
+    branches,
+    loading: loadingBranches,
+    settled: branchesSettled,
+  } = useBranches(selectedRepository?.repoOwner ?? "", selectedRepository?.repoName ?? "");
 
   // Prebuild status for the repository and environment options: the unified
   // cross-scope feed (repo and environment scopes, failed rows included), one
@@ -417,6 +420,8 @@ export function useSessionTargetPicker({
     repos,
     loadingRepos,
     selectedRepo,
+    loadingEnvironments,
+    branchesSettled,
     teamHasRepositoryGrants,
     repositoryGrantError,
     isLaunchable: isSessionTargetLaunchable(sessionTarget),

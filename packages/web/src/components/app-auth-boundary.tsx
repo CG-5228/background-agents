@@ -6,6 +6,7 @@ import { APP_NAME } from "@/lib/site-config";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { useCurrentUserAuthorization } from "@/hooks/use-current-user-authorization";
+import { usePageLoadMilestone } from "@/hooks/use-page-load-milestone";
 
 /**
  * Renders application children only for authenticated, active workspace users after authorization resolves.
@@ -13,6 +14,13 @@ import { useCurrentUserAuthorization } from "@/hooks/use-current-user-authorizat
 export function AppAuthBoundary({ children }: { children: React.ReactNode }) {
   const { status } = useAuthSession();
   const { authorization, loading: authorizationLoading } = useCurrentUserAuthorization();
+  usePageLoadMilestone(
+    "auth_cleared",
+    status === "authenticated" &&
+      !authorizationLoading &&
+      authorization !== null &&
+      authorization.suspendedAt === null
+  );
 
   if (status === "loading") {
     return (

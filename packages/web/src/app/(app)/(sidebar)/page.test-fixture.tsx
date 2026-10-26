@@ -96,12 +96,19 @@ const mocks = vi.hoisted(() => {
     },
     keyboardShortcuts: null as unknown as KeyboardShortcutPreferences,
     canCreateSession: true,
+    branchesSettled: true,
+    markPageLoadMilestone: vi.fn(),
     ...teamContext,
     setActiveTeam: vi.fn(),
   };
 });
 
 export { mocks };
+
+vi.mock("@/lib/page-load-telemetry", () => ({
+  markPageLoadMilestone: mocks.markPageLoadMilestone,
+  getPageLoadId: () => undefined,
+}));
 
 export const repo = {
   id: 1,
@@ -215,7 +222,11 @@ vi.mock("@/hooks/use-repos", () => ({
 }));
 
 vi.mock("@/hooks/use-branches", () => ({
-  useBranches: () => ({ branches: [{ name: "main" }], loading: false }),
+  useBranches: () => ({
+    branches: [{ name: "main" }],
+    loading: false,
+    settled: mocks.branchesSettled,
+  }),
 }));
 
 vi.mock("@/hooks/use-enabled-models", () => ({
@@ -281,6 +292,8 @@ beforeEach(() => {
   mocks.providerAccountsLoadingValue = false;
   mocks.keyboardShortcuts = DEFAULT_KEYBOARD_SHORTCUTS;
   mocks.canCreateSession = true;
+  mocks.branchesSettled = true;
+  mocks.markPageLoadMilestone.mockReset();
   mocks.userId = "user-1";
   mocks.activeTeamId = null;
   mocks.scope = undefined;

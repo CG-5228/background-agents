@@ -6,6 +6,11 @@ import { Toaster } from "@/components/ui/sonner";
 import { SyntaxHighlightTheme } from "@/components/syntax-highlight-theme";
 import { browserApiFetch, type BrowserApiPath } from "@/lib/browser-api-fetch";
 import { SwrFetchError } from "@/lib/swr-fetch-error";
+import { PageLoadTelemetry } from "@/components/page-load-telemetry";
+import { startPageLoadTelemetry } from "@/lib/page-load-telemetry";
+
+// SWR starts fetching in layout effects, before a telemetry component's passive effect.
+if (typeof window !== "undefined") startPageLoadTelemetry();
 
 async function swrFetcher<T>(url: BrowserApiPath): Promise<T> {
   // SWR falls back to this fetcher for every hook that omits its own, including
@@ -20,6 +25,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
       <SWRConfig value={{ fetcher: swrFetcher, revalidateOnFocus: true, dedupingInterval: 2000 }}>
+        <PageLoadTelemetry />
         {children}
         <SyntaxHighlightTheme />
         <Toaster />

@@ -34,6 +34,45 @@ function activeOpenAiAccount(id: string): (typeof mocks.providerAccountsValue)[n
 }
 
 describe("Home", () => {
+  it("marks composer readiness only after all catalogs and models load", () => {
+    mocks.loadingReposValue = true;
+    mocks.environmentsLoadingValue = true;
+    mocks.enabledModelsLoadingValue = true;
+    const { rerender } = render(<Home />);
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("composer_ready");
+    mocks.loadingReposValue = false;
+    rerender(<Home />);
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("composer_ready");
+    mocks.environmentsLoadingValue = false;
+    rerender(<Home />);
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("composer_ready");
+    mocks.enabledModelsLoadingValue = false;
+    rerender(<Home />);
+    expect(mocks.markPageLoadMilestone).toHaveBeenCalledWith("composer_ready");
+  });
+
+  it("does not mark the composer ready without creation permission", () => {
+    mocks.canCreateSession = false;
+    render(<Home />);
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("composer_ready");
+  });
+
+  it("waits for repo branches to settle, not just a false loading flag", () => {
+    mocks.branchesSettled = false;
+    const { rerender } = render(<Home />);
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("picker_ready");
+    mocks.branchesSettled = true;
+    rerender(<Home />);
+    expect(mocks.markPageLoadMilestone).toHaveBeenCalledWith("picker_ready");
+  });
+
+  it("marks a non-repository target ready without waiting for branches", () => {
+    mocks.reposValue = [];
+    mocks.branchesSettled = false;
+    render(<Home />);
+    expect(mocks.markPageLoadMilestone).toHaveBeenCalledWith("picker_ready");
+  });
+
   it("creates sessions using the saved personal-memory preference without a composer override", async () => {
     render(<Home />);
     expect(

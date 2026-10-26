@@ -14,6 +14,9 @@ import { item, page, snapshot } from "@/test/session-inbox-fixtures";
 import { reconcileSessionReadState } from "@/lib/session-read-state";
 import { browserApiFetch } from "@/lib/browser-api-fetch";
 import { updateSessionScope } from "@/lib/session-scope";
+import { markPageLoadMilestone } from "@/lib/page-load-telemetry";
+
+vi.mock("@/lib/page-load-telemetry", () => ({ markPageLoadMilestone: vi.fn() }));
 
 vi.mock("@/lib/browser-api-fetch", () => ({ browserApiFetch: vi.fn() }));
 
@@ -89,12 +92,36 @@ afterEach(() => {
   localStorage.clear();
   setVisibility("visible");
   vi.restoreAllMocks();
+  vi.clearAllMocks();
   vi.useRealTimers();
   teamContext.activeTeamId = null;
   teamContext.scope = undefined;
 });
 
 describe("useSidebarSessions", () => {
+  it("does not mark a late-key inbox ready until even an empty snapshot settles", async () => {
+    const pending = deferred<SessionInboxSnapshot>();
+    const { rerender } = renderHook(useSidebarSessions, {
+      wrapper: wrapper(() => pending.promise),
+    });
+    expect(markPageLoadMilestone).not.toHaveBeenCalled();
+    await act(async () =>
+      pending.resolve(
+        snapshot({ needs_attention: page([]), in_progress: page([]), finished: page([]) })
+      )
+    );
+    expect(markPageLoadMilestone).toHaveBeenCalledWith("sidebar_populated");
+    vi.mocked(markPageLoadMilestone).mockClear();
+    rerender();
+    expect(markPageLoadMilestone).not.toHaveBeenCalled();
+  });
+
+  it("marks the inbox settled after a failed snapshot request", async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error("Unavailable"));
+    renderHook(useSidebarSessions, { wrapper: wrapper(fetcher) });
+    await waitFor(() => expect(markPageLoadMilestone).toHaveBeenCalledWith("sidebar_populated"));
+  });
+
   it("uses the selected team for snapshot and cursor requests and drops retained pages on switches", async () => {
     teamContext.activeTeamId = "team_alpha";
     const fetcher = vi.fn(async (key: string) =>

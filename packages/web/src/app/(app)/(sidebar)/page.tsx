@@ -72,6 +72,7 @@ import {
 } from "@/lib/composer-access";
 import { buildInteractiveProviderRoutingIdentity } from "@/lib/provider-selection";
 import type { TeamResponse } from "@/hooks/use-teams";
+import { usePageLoadMilestone } from "@/hooks/use-page-load-milestone";
 
 const LAST_SESSION_ACCESS_STORAGE_KEY = "open-inspect-last-session-access";
 
@@ -162,6 +163,19 @@ export default function Home() {
   const providerAccounts = useProviderAccounts();
   const sessionAttachments = useSessionAttachments();
   const models = useEnabledModels();
+  usePageLoadMilestone(
+    "composer_ready",
+    !!session &&
+      canCreateSession &&
+      !picker.loadingRepos &&
+      !picker.loadingEnvironments &&
+      !models.loading
+  );
+  usePageLoadMilestone(
+    "picker_ready",
+    picker.sessionTarget !== null &&
+      (picker.sessionTarget.kind !== "repo" || picker.branchesSettled)
+  );
   const preferences = useLaunchPreferences({ models, providerAccounts });
   const { selectedModel, reasoningEffort, harness, providerSelections } = preferences;
   const targetRequestFields = buildRequestFields();

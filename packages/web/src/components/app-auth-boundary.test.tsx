@@ -3,11 +3,12 @@
 
 import { cleanup, render, screen } from "@testing-library/react";
 import * as matchers from "@testing-library/jest-dom/matchers";
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAuthSession } from "@/lib/auth-session";
 import { AppAuthBoundary } from "./app-auth-boundary";
 import { useCurrentUserAuthorization } from "@/hooks/use-current-user-authorization";
+import { markPageLoadMilestone } from "@/lib/page-load-telemetry";
 
 expect.extend(matchers);
 
@@ -17,6 +18,7 @@ vi.mock("@/lib/auth-session", () => ({
 vi.mock("@/hooks/use-current-user-authorization", () => ({
   useCurrentUserAuthorization: vi.fn(),
 }));
+vi.mock("@/lib/page-load-telemetry", () => ({ markPageLoadMilestone: vi.fn() }));
 
 const activeAuthorization = {
   userId: "11111111111111111111111111111111",
@@ -45,6 +47,50 @@ afterEach(() => {
 });
 
 describe("AppAuthBoundary", () => {
+  it("marks auth cleared once, only when children can render", () => {
+    const mark = vi.mocked(markPageLoadMilestone);
+    vi.mocked(useAuthSession).mockReturnValue({ data: null, status: "loading" });
+    vi.mocked(useCurrentUserAuthorization).mockReturnValue({
+      authorization: null,
+      loading: true,
+      error: null,
+      hasPermission: () => false,
+    });
+    const tree = () => (
+      <StrictMode>
+        <AppAuthBoundary>Session</AppAuthBoundary>
+      </StrictMode>
+    );
+    const { rerender } = render(tree());
+    expect(mark).not.toHaveBeenCalled();
+    vi.mocked(useAuthSession).mockReturnValue({
+      data: { user: { id: "user-1" } },
+      status: "authenticated",
+    });
+    rerender(tree());
+    expect(mark).not.toHaveBeenCalled();
+    for (const authorization of [null, { ...activeAuthorization, suspendedAt: 1 }]) {
+      vi.mocked(useCurrentUserAuthorization).mockReturnValue({
+        authorization,
+        loading: false,
+        error: null,
+        hasPermission: () => false,
+      });
+      rerender(tree());
+      expect(mark).not.toHaveBeenCalled();
+    }
+    vi.mocked(useCurrentUserAuthorization).mockReturnValue({
+      authorization: activeAuthorization,
+      loading: false,
+      error: null,
+      hasPermission: () => true,
+    });
+    rerender(tree());
+    expect(screen.getByText("Session")).toBeInTheDocument();
+    rerender(tree());
+    expect(mark).toHaveBeenCalledExactlyOnceWith("auth_cleared");
+  });
+
   it("renders the app only for authenticated users", () => {
     vi.mocked(useAuthSession).mockReturnValue({
       data: { user: { id: "user-1", name: "Test User" } },

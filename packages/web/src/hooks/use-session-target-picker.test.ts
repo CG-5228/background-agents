@@ -23,10 +23,11 @@ import {
 const mocks = vi.hoisted(() => ({
   repos: vi.fn(),
   environments: vi.fn(),
+  branches: vi.fn(),
 }));
 vi.mock("@/hooks/use-repos", () => ({ useRepos: mocks.repos }));
 vi.mock("@/hooks/use-environments", () => ({ useEnvironments: mocks.environments }));
-vi.mock("@/hooks/use-branches", () => ({ useBranches: () => ({ branches: [], loading: false }) }));
+vi.mock("@/hooks/use-branches", () => ({ useBranches: mocks.branches }));
 vi.mock("@/hooks/use-image-builds", () => ({ useImageBuilds: () => ({ data: undefined }) }));
 
 function environment(overrides: Partial<Environment> = {}): Environment {
@@ -121,6 +122,7 @@ function repoStatusMap(status: ImageBuildStatus): Map<string, ImageBuildStatus> 
 
 describe("useSessionTargetPicker", () => {
   beforeEach(() => {
+    mocks.branches.mockReset().mockReturnValue({ branches: [], loading: false, settled: true });
     mocks.repos.mockReset().mockReturnValue({ repos: [repo()], loading: false });
     mocks.environments
       .mockReset()
@@ -129,6 +131,22 @@ describe("useSessionTargetPicker", () => {
   afterEach(() => {
     cleanup();
     localStorage.clear();
+  });
+
+  it("exposes environment loading and actual branch settlement for page milestones", () => {
+    mocks.environments.mockReturnValue({ environments: [], loading: true });
+    mocks.branches.mockReturnValue({ branches: [], loading: false, settled: false });
+    const { result, rerender } = renderHook(() => useSessionTargetPicker());
+    expect(result.current.loadingEnvironments).toBe(true);
+    expect(result.current.branchesSettled).toBe(false);
+    mocks.environments.mockReturnValue({ environments: [], loading: false });
+    rerender();
+    expect(result.current.sessionTarget?.kind).toBe("repo");
+    expect(result.current.loadingEnvironments).toBe(false);
+    expect(result.current.branchesSettled).toBe(false);
+    mocks.branches.mockReturnValue({ branches: [], loading: false, settled: true });
+    rerender();
+    expect(result.current.branchesSettled).toBe(true);
   });
 
   it("limits workspace session creation to workspace-owned environments", () => {

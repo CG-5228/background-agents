@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { getServerAuthSession } from "@/lib/server-auth-session";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { relayJsonResponse } from "@/lib/control-plane-json-proxy";
+import { isSameOriginRequest } from "@/lib/same-origin-request";
 import {
   sessionInboxMarkReadRequestSchema,
   type SessionInboxMarkReadRequest,
@@ -14,22 +15,7 @@ import {
  */
 function isSameOriginJsonRequest(request: NextRequest): boolean {
   const contentType = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-  if (contentType !== "application/json") return false;
-  const origin = request.headers.get("origin");
-  if (!origin) return false;
-  let originHost: string;
-  try {
-    originHost = new URL(origin).host;
-  } catch {
-    return false;
-  }
-  // Behind a proxy the request URL may carry an internal host; browsers
-  // cannot forge Host or X-Forwarded-Host.
-  return [
-    new URL(request.url).host,
-    request.headers.get("host"),
-    request.headers.get("x-forwarded-host"),
-  ].includes(originHost);
+  return contentType === "application/json" && isSameOriginRequest(request);
 }
 
 export async function POST(request: NextRequest) {

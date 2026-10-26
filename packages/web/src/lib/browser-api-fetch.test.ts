@@ -39,4 +39,50 @@ describe("browserApiFetch", () => {
       credentials: "same-origin",
     });
   });
+
+  it("adds the page-load trace only after telemetry starts", async () => {
+    vi.resetModules();
+    vi.stubGlobal("window", { location: { pathname: "/" } });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { browserApiFetch: loadFetch } = await import("./browser-api-fetch");
+    const { startPageLoadTelemetry, getPageLoadId } = await import("./page-load-telemetry");
+    await loadFetch("/api/repos");
+    expect(fetchMock.mock.calls[0][1]).not.toHaveProperty("headers");
+    startPageLoadTelemetry();
+    await loadFetch("/api/repos");
+    expect(new Headers(fetchMock.mock.calls[1][1].headers).get("x-trace-id")).toBe(getPageLoadId());
+  });
+
+  it.each([
+    { "Content-Type": "application/json" },
+    [["Content-Type", "application/json"]],
+    new Headers({ "Content-Type": "application/json" }),
+  ] satisfies HeadersInit[])("preserves caller headers while adding a trace", async (headers) => {
+    vi.resetModules();
+    vi.stubGlobal("window", { location: { pathname: "/" } });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { browserApiFetch: loadFetch } = await import("./browser-api-fetch");
+    const { startPageLoadTelemetry, getPageLoadId } = await import("./page-load-telemetry");
+    startPageLoadTelemetry();
+    await loadFetch("/api/rum", { headers });
+    const merged = new Headers(fetchMock.mock.calls[0][1].headers);
+    expect(merged.get("content-type")).toBe("application/json");
+    expect(merged.get("x-trace-id")).toBe(getPageLoadId());
+    expect(new Headers(headers).has("x-trace-id")).toBe(false);
+  });
+
+  it("preserves an explicit trace id case-insensitively", async () => {
+    vi.resetModules();
+    vi.stubGlobal("window", { location: { pathname: "/" } });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { browserApiFetch: loadFetch } = await import("./browser-api-fetch");
+    const { startPageLoadTelemetry } = await import("./page-load-telemetry");
+    startPageLoadTelemetry();
+    const headers = { "X-Trace-Id": "caller-trace" };
+    await loadFetch("/api/repos", { headers });
+    expect(fetchMock.mock.calls[0][1].headers).toBe(headers);
+  });
 });
