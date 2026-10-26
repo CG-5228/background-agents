@@ -62,10 +62,16 @@ describe("isSameOriginRequest", () => {
     );
   });
 
-  it("compares effective default ports", () => {
+  it.each([
+    ["https", 443],
+    ["http", 80],
+  ] as const)("compares effective default ports for %s", (protocol, port) => {
     expect(
       isSameOriginRequest(
-        request({ Origin: "https://public.example.com", Host: "public.example.com:443" })
+        request(
+          { Origin: `${protocol}://public.example.com`, Host: `public.example.com:${port}` },
+          `${protocol}://internal.example.com/api/rum`
+        )
       )
     ).toBe(true);
   });

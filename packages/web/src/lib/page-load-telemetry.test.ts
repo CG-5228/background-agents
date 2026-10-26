@@ -95,15 +95,18 @@ describe("page-load telemetry", () => {
     expect(payload(1)).toMatchObject({ seq: 2, reason: "pagehide", vitals: [{ value: 300 }] });
   });
 
-  it.each(["soft-navigation", "back-forward-cache"])(
-    "does not replace hard-load vitals with %s measurements",
-    (navigationType) => {
+  it.each([
+    ["soft-navigation", "LCP"],
+    ["back-forward-cache", "TTFB"],
+  ] as const)(
+    "does not replace hard-load vitals with %s %s measurements",
+    (navigationType, name) => {
       telemetry.startPageLoadTelemetry();
-      const vital = { name: "LCP" as const, value: 250, rating: "good" as const, id: "hard-lcp" };
+      const vital = { name, value: 250, rating: "good" as const, id: "hard-vital" };
       telemetry.recordWebVital({ ...vital, navigationType: "reload" });
       window.history.replaceState(null, "", "/settings");
       telemetry.recordWebVital({ ...vital, value: 300, navigationType: "reload" });
-      telemetry.recordWebVital({ ...vital, value: 0, id: "other-lcp", navigationType });
+      telemetry.recordWebVital({ ...vital, value: 0, id: "other-vital", navigationType });
       telemetry.flushPageLoadTelemetry("hidden");
       expect(payload().vitals).toEqual([{ ...vital, value: 300 }]);
       expect(payload().path).toBe("/");

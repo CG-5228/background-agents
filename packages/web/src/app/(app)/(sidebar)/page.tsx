@@ -163,19 +163,6 @@ export default function Home() {
   const providerAccounts = useProviderAccounts();
   const sessionAttachments = useSessionAttachments();
   const models = useEnabledModels();
-  usePageLoadMilestone(
-    "composer_ready",
-    !!session &&
-      canCreateSession &&
-      !picker.loadingRepos &&
-      !picker.loadingEnvironments &&
-      !models.loading
-  );
-  usePageLoadMilestone(
-    "picker_ready",
-    picker.sessionTarget !== null &&
-      (picker.sessionTarget.kind !== "repo" || picker.branchesSettled)
-  );
   const preferences = useLaunchPreferences({ models, providerAccounts });
   const { selectedModel, reasoningEffort, harness, providerSelections } = preferences;
   const targetRequestFields = buildRequestFields();
@@ -187,6 +174,18 @@ export default function Home() {
   } = useSkillResolutionPreview(currentSkillPreviewTarget, skillSelection);
 
   const launchContextReady = canCreateSession && teamCreationReady && preferences.providerReady;
+  usePageLoadMilestone(
+    "composer_ready",
+    !!session && launchContextReady && preferences.ready && isLaunchable
+  );
+  usePageLoadMilestone(
+    "picker_ready",
+    !!session &&
+      canCreateSession &&
+      teamCreationReady &&
+      sessionTarget !== null &&
+      (sessionTarget.kind !== "repo" || picker.branchesSettled)
+  );
   const warmRequest: WarmDraftSessionRequest | null =
     launchContextReady && session && preferences.ready && targetRequestFields
       ? {

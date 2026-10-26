@@ -51,10 +51,37 @@ describe("Home", () => {
     expect(mocks.markPageLoadMilestone).toHaveBeenCalledWith("composer_ready");
   });
 
-  it("does not mark the composer ready without creation permission", () => {
+  it("does not mark the composer or picker ready without creation permission", () => {
     mocks.canCreateSession = false;
     render(<Home />);
     expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("composer_ready");
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("picker_ready");
+  });
+
+  it("waits for settled team context before marking the composer and picker ready", () => {
+    mocks.teamsLoading = true;
+    const { rerender } = render(<Home />);
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("composer_ready");
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("picker_ready");
+    mocks.teamsLoading = false;
+    mocks.teamsError = new Error("Unavailable");
+    rerender(<Home />);
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("composer_ready");
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("picker_ready");
+    mocks.teamsError = undefined;
+    rerender(<Home />);
+    expect(mocks.markPageLoadMilestone).toHaveBeenCalledWith("composer_ready");
+    expect(mocks.markPageLoadMilestone).toHaveBeenCalledWith("picker_ready");
+  });
+
+  it("waits for provider readiness for the composer but not the picker", () => {
+    mocks.providerAccountsLoadingValue = true;
+    const { rerender } = render(<Home />);
+    expect(mocks.markPageLoadMilestone).not.toHaveBeenCalledWith("composer_ready");
+    expect(mocks.markPageLoadMilestone).toHaveBeenCalledWith("picker_ready");
+    mocks.providerAccountsLoadingValue = false;
+    rerender(<Home />);
+    expect(mocks.markPageLoadMilestone).toHaveBeenCalledWith("composer_ready");
   });
 
   it("waits for repo branches to settle, not just a false loading flag", () => {
