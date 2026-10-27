@@ -2,6 +2,13 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## October 27, 2026
+
+**GitHub sign-in diagnostics.** Failed sign-ins, including provider and admission checks and a
+cancelled consent screen, return to the login page with an error and a retry option. If the GitHub
+App lacks **Email addresses: Read-only**, the page names the permission to check and the control
+plane logs GitHub's status. Rate limits show a temporary failure instead.
+
 ## October 26, 2026
 
 **Fewer memory proposals.** Agents no longer weigh a memory at the end of every task; saving nothing
