@@ -179,14 +179,13 @@ function createGoogleAuthConfig(
 }
 
 function withClaim(
-  provider: SignInProvider,
   claim: SignInClaim,
   config: SocialProviderAuthConfig | undefined
 ): SocialProviderAuthConfig | undefined {
   if (!config) return undefined;
   return {
     ...config,
-    getUserInfo: claim.wrapResolver(provider, config.getUserInfo),
+    getUserInfo: claim.wrapResolver(config.getUserInfo),
   };
 }
 
@@ -207,15 +206,10 @@ function createUserAuthRuntime(
   };
   const claim = new SignInClaim(new IdentityClaimStore(database));
   const github = withClaim(
-    "github",
     claim,
     createGitHubAuthConfig(config.providers.github, config.appName, admissionPolicy)
   );
-  const google = withClaim(
-    "google",
-    claim,
-    createGoogleAuthConfig(config.providers.google, admissionPolicy)
-  );
+  const google = withClaim(claim, createGoogleAuthConfig(config.providers.google, admissionPolicy));
 
   const auth = createUserAuth({
     database,

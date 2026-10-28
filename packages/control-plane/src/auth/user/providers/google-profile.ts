@@ -65,13 +65,12 @@ export class GoogleSignInProfileResolver {
 
     return {
       user: {
-        id: signIn.identity.subject,
         name: signIn.identity.displayName ?? email,
         email,
         ...(signIn.identity.avatarUrl ? { image: signIn.identity.avatarUrl } : {}),
         emailVerified: true,
       },
-      data: parsedClaims.data,
+      data: signIn.identity,
     };
   };
 }

@@ -33,7 +33,6 @@ export class GitHubSignInProfileResolver {
 
     return {
       user: {
-        id: identity.subject,
         name: identity.displayName ?? identity.login ?? email,
         email,
         ...(identity.avatarUrl ? { image: identity.avatarUrl } : {}),

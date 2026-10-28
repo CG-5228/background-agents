@@ -252,7 +252,7 @@ describe("runtime-managed admission", () => {
     rules = { ...emptyAdmissionRules(), allowedGitHubUsers: ["octocat"] };
     expect(getUserAuthRuntime(githubEnv, database)).toBe(cached);
     for (const resolver of [first, second]) {
-      await expect(resolver(tokens)).resolves.toMatchObject({ user: { id: "123" } });
+      await expect(resolver(tokens)).resolves.toMatchObject({ data: { subject: "123" } });
     }
     rules = emptyAdmissionRules();
     for (const resolver of [first, second]) {
@@ -387,7 +387,7 @@ describe("runtime-managed admission", () => {
     }
     rules = { ...emptyAdmissionRules(), allowedEmailDomains: ["corp.example"] };
     await expect(resolver({ idToken: "google-token" })).resolves.toMatchObject({
-      user: { id: "google-subject" },
+      data: { subject: "google-subject" },
     });
     expect(AdmissionPolicyStore.prototype.get).toHaveBeenCalledTimes(4);
   });
