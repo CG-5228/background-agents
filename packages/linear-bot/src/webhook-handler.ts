@@ -4,6 +4,7 @@
  */
 
 import type { LinearCallbackContext } from "@open-inspect/shared/types/session-api";
+import { ACTOR_EMAIL_REQUIRED_CODE } from "@open-inspect/shared/types/actors";
 import { MAX_WEB_PROMPT_CHARS } from "@open-inspect/shared/types/prompts";
 import { checkHarnessCompatibility, getHarnessLabel } from "@open-inspect/shared/harnesses";
 import { z } from "zod";
@@ -118,7 +119,7 @@ async function handleStop(webhook: AgentSessionWebhook, env: Env, traceId: strin
         if (
           stopRes.status === 403 &&
           z
-            .object({ code: z.literal("actor_email_required") })
+            .object({ code: z.literal(ACTOR_EMAIL_REQUIRED_CODE) })
             .safeParse(await stopRes.json().catch(() => null)).success
         ) {
           const client = await getLinearClientOrThrow(

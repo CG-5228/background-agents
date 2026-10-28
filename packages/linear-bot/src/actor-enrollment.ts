@@ -1,19 +1,22 @@
-import { z } from "zod";
+import { enrollActor } from "@open-inspect/shared/actor-enrollment";
+import { abortable } from "@open-inspect/shared/abortable";
+import {
+  ACTOR_ADMISSION_DENIED_CODE,
+  ACTOR_EMAIL_REQUIRED_CODE,
+  type ActorProfileClaims,
+} from "@open-inspect/shared/types/actors";
 import type { Env } from "./types";
-import { signedControlPlaneFetch } from "./internal-auth";
 import { fetchUser, type LinearApiClient } from "./utils/linear-client";
-import { abortable } from "./utils/abortable";
 import { createLogger } from "./logger";
-import type { ActorProfileClaims } from "@open-inspect/shared/types/actors";
 
 export const ACTOR_ENROLLMENT_TIMEOUT_MS = 10_000;
 const log = createLogger("actor-enrollment");
 
 export function describeActorAdmissionFailure(code: string): string | null {
-  if (code === "actor_email_required") {
+  if (code === ACTOR_EMAIL_REQUIRED_CODE) {
     return "Cannot link your Linear account because its email is unavailable. Ask an administrator to check that the bot can read your Linear email.";
   }
-  if (code === "actor_admission_denied") {
+  if (code === ACTOR_ADMISSION_DENIED_CODE) {
     return "Your account is not authorized to join this Open-Inspect workspace. Sign in on the web with your Linear email, or ask an administrator to check the admission allowlists.";
   }
   return null;
@@ -32,46 +35,29 @@ export async function enrollLinearActor(
     const signal = AbortSignal.timeout(ACTOR_ENROLLMENT_TIMEOUT_MS);
     let claims: ActorProfileClaims = {};
     for (let attempt = 0; attempt < 2; attempt++) {
-      const response = await abortable(
-        signedControlPlaneFetch(
-          env,
-          {
-            method: "POST",
-            url: "https://internal/actors/me",
-            actor: context.actor,
-            body: JSON.stringify(claims),
-            traceId,
-          },
-          { signal }
-        ),
+      const result = await enrollActor(
+        "linear-bot",
+        env,
+        { actor: context.actor, profile: claims, traceId },
         signal
       );
-      httpStatus = response.status;
-      if (response.ok) return null;
-      const body = await abortable(
-        response.json().catch(() => null),
-        signal
-      );
-      const refusal = z.object({ code: z.string() }).safeParse(body);
-      if (
-        attempt === 0 &&
-        response.status === 403 &&
-        refusal.success &&
-        refusal.data.code === "actor_email_required"
-      ) {
+      httpStatus = result.httpStatus ?? httpStatus;
+      if (result.outcome === "enrolled") return null;
+      if (attempt === 0 && result.outcome === "email_required") {
         const profile = await abortable(fetchUser(client, actorUserId, signal), signal);
         claims = { displayName: profile?.name, email: profile?.email ?? undefined };
         continue;
       }
       const message =
-        response.status === 403 && refusal.success
-          ? describeActorAdmissionFailure(refusal.data.code)
+        result.outcome !== "unavailable" && result.errorCode
+          ? describeActorAdmissionFailure(result.errorCode)
           : null;
       log.warn("control_plane.enroll_actor", {
         ...context,
         outcome: message ? "denied" : "unavailable",
         http_status: httpStatus,
-        error_code: refusal.success ? refusal.data.code : undefined,
+        error_code: result.errorCode,
+        error: result.error,
       });
       if (message) return message;
       break;

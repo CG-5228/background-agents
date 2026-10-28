@@ -18,7 +18,7 @@ import {
   LinearAuthError,
 } from "./linear-credentials";
 import { z } from "zod";
-import { abortable } from "./abortable";
+import { abortable } from "@open-inspect/shared/abortable";
 
 export {
   completeLinearOAuthInstallation,

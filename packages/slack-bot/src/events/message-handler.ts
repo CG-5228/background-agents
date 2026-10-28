@@ -6,6 +6,7 @@ import {
   updateMessage,
 } from "@open-inspect/shared/slack";
 import type { CallbackContext } from "@open-inspect/shared/types/session-api";
+import type { ActorEnrollmentOutcome } from "@open-inspect/shared/types/actors";
 import type { SlackMessageAttachment, SlackMessageFile } from "@open-inspect/shared/slack";
 import {
   IMAGE_ONLY_PROMPT_TEXT,
@@ -42,11 +43,7 @@ import {
 } from "../messages/context";
 import { storePendingRequest } from "../pending-requests/pending-request-store";
 import { deliverPrompt } from "../sessions/prompt-delivery";
-import {
-  checkPublicationAccess,
-  enrollActor,
-  type EnrollActorResult,
-} from "../sessions/control-plane-client";
+import { checkPublicationAccess, enrollActor } from "../sessions/control-plane-client";
 import {
   loadAuthoritativeSlackLaunchSettings,
   startSessionAndSendPrompt,
@@ -159,7 +156,7 @@ async function resolveThreadSessionAdmission(
   return { kind: "followUp", session, threadTs };
 }
 
-const ENROLLMENT_REFUSAL_MESSAGES: Record<Exclude<EnrollActorResult, "enrolled">, string> = {
+const ENROLLMENT_REFUSAL_MESSAGES: Record<Exclude<ActorEnrollmentOutcome, "enrolled">, string> = {
   // A hidden profile email (e.g. Slack Connect), a missing scope, or a failed
   // users.info lookup all look the same here, so the reply names none of them.
   email_required:
